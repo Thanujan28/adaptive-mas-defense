@@ -359,6 +359,11 @@ If no tool is required:
     "arguments": {{}}
 }}
 """
+        print("\n" + "=" * 100)
+        print("FULL PROMPT RECEIVED BY ANALYST")
+        print("=" * 100)
+        print(prompt)
+        print("=" * 100)
 
         response = self.llm.invoke(prompt)
 

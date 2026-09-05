@@ -72,9 +72,49 @@ class MASEnvironment:
         MASEvent
             -> event logging
 
-    Each agent has its own independent memory.
 
-    Agents NEVER directly access tools.
+    Supported communication topologies:
+
+        1. Layered
+        2. Centralized
+        3. Decentralized
+        4. Shared Pool
+
+
+    Layered:
+
+        Coordinator
+             |
+             v
+        Researcher
+             |
+             v
+          Analyst
+             |
+             v
+         Executor
+
+
+    Centralized:
+
+              Coordinator
+             /     |      \
+            v      v       v
+        Researcher Analyst Executor
+
+
+    Decentralized:
+
+        Any agent <-> Any other agent
+
+
+    Shared Pool:
+
+        Coordinator ──┐
+        Researcher  ──┤
+        Analyst     ──┼──> Shared Pool
+        Executor    ──┘
+
 
     Tool flow:
 
@@ -89,24 +129,6 @@ class MASEnvironment:
         Coordinator
             ↓
         Agent
-
-    Main workflow:
-
-        User Task
-             ↓
-        Coordinator
-             ↓
-        Researcher
-             ↓
-        Analyst
-             ↓
-        Executor
-             ↓
-        Final Coordinator
-             ↓
-        Report Writer
-             ↓
-        Final Result
     """
 
     def __init__(
@@ -183,15 +205,21 @@ class MASEnvironment:
         # COMMUNICATION TOPOLOGY
         # =====================================================
 
-        self.topology_name = topology_name
+        self.topology_name = topology_name.lower()
 
         self.topology = CommunicationTopology.create(
-            topology_name,
+            self.topology_name,
             self.agent_names
         )
 
-        print("\nCommunication topology:" + topology_name)
-        print(self.topology.get_edges())
+        print(
+            "\nCommunication topology:"
+            + self.topology_name
+        )
+
+        print(
+            self.topology.get_edges()
+        )
 
         # =====================================================
         # EVENT LOG
@@ -200,25 +228,28 @@ class MASEnvironment:
         self.events = []
 
         # =====================================================
+        # SHARED COMMUNICATION POOL
+        # =====================================================
+
+        self.shared_pool = []
+
+        # =====================================================
         # BUILD LANGGRAPH WORKFLOW
         # =====================================================
 
         self.graph = self._build_graph()
 
     # =========================================================
-    # EVENT LOGGING
-    # =========================================================
-
-        # =========================================================
     # EVENT LOGGING HELPERS
     # =========================================================
 
     @staticmethod
     def _content_length(content) -> int:
         """
-        Return content length without storing the content
-        inside the event log.
+        Return content length without storing the actual
+        content inside the event log.
         """
+
         if content is None:
             return 0
 
@@ -232,6 +263,7 @@ class MASEnvironment:
         Actual argument values are deliberately excluded
         from the event log.
         """
+
         if not isinstance(arguments, dict):
             return []
 
@@ -246,7 +278,9 @@ class MASEnvironment:
             event
         )
 
-        print("\n" + "-" * 70)
+        print(
+            "\n" + "-" * 70
+        )
 
         print(
             f"[{event.timestamp}] "
@@ -288,7 +322,9 @@ class MASEnvironment:
                 f"Metadata : {event.metadata}"
             )
 
-        print("-" * 70)
+        print(
+            "-" * 70
+        )
 
     # =========================================================
     # COMMUNICATION
@@ -301,9 +337,112 @@ class MASEnvironment:
         content: str
     ):
         """
-        Send a message between agents according to
-        the configured communication topology.
+        Send a message according to the configured
+        communication topology.
+
+        For:
+
+            layered
+            centralized
+            decentralized
+
+        communication is validated directly against
+        the NetworkX topology.
+
+        For:
+
+            shared_pool
+
+        the message is published to the shared
+        communication pool instead of creating a
+        direct agent-to-agent communication path.
         """
+
+        # =====================================================
+        # VALIDATE AGENTS
+        # =====================================================
+
+        if sender not in self.agent_names:
+            raise ValueError(
+                f"Unknown sender: {sender}"
+            )
+
+        if receiver not in self.agent_names:
+            raise ValueError(
+                f"Unknown receiver: {receiver}"
+            )
+
+        # =====================================================
+        # SHARED POOL COMMUNICATION
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            # -------------------------------------------------
+            # Store actual message in internal pool.
+            #
+            # The complete message is NOT placed in the
+            # security event log.
+            # -------------------------------------------------
+
+            self.shared_pool.append(
+                {
+                    "message_id":
+                        str(uuid.uuid4()),
+
+                    "sender":
+                        sender,
+
+                    "receiver":
+                        receiver,
+
+                    "content":
+                        content,
+                }
+            )
+
+            # -------------------------------------------------
+            # Log pool write
+            # -------------------------------------------------
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="pool_write",
+
+                    sender=sender,
+
+                    receiver="shared_pool",
+
+                    content=(
+                        f"{sender} published message "
+                        f"to shared pool"
+                    ),
+
+                    metadata={
+                        "topology":
+                            self.topology_name,
+
+                        "target_agent":
+                            receiver,
+
+                        "content_length":
+                            self._content_length(
+                                content
+                            ),
+
+                        "pool_size":
+                            len(
+                                self.shared_pool
+                            )
+                    }
+                )
+            )
+
+            return content
+
+        # =====================================================
+        # DIRECT COMMUNICATION
+        # =====================================================
 
         if not self.topology.can_communicate(
             sender,
@@ -315,31 +454,93 @@ class MASEnvironment:
                 f"{sender} -> {receiver}"
             )
 
-        event = MASEvent.create(
-            event_type="message",
-            sender=sender,
-            receiver=receiver,
-            content=(
-                f"{sender} sent message to {receiver}"
-            ),
-            metadata={
-                "topology":
-                    self.topology_name
-            }
-        )
+        # =====================================================
+        # LOG DIRECT MESSAGE
+        # =====================================================
 
         self.log_event(
-            event
+            MASEvent.create(
+                event_type="message",
+
+                sender=sender,
+
+                receiver=receiver,
+
+                content=(
+                    f"{sender} sent message "
+                    f"to {receiver}"
+                ),
+
+                metadata={
+                    "topology":
+                        self.topology_name,
+
+                    "content_length":
+                        self._content_length(
+                            content
+                        )
+                }
+            )
         )
 
         return content
 
     # =========================================================
-    # TOOL REQUEST ROUTING
+    # SHARED POOL READ
     # =========================================================
 
+    def read_shared_pool(
+        self,
+        receiver: str
+    ):
+        """
+        Retrieve messages intended for an agent
+        from the shared communication pool.
 
-        # =========================================================
+        Only metadata is logged.
+        Actual message contents remain in memory.
+        """
+
+        if self.topology_name != "shared_pool":
+
+            raise ValueError(
+                "Shared pool can only be accessed "
+                "when using shared_pool topology."
+            )
+
+        messages = [
+            message
+            for message in self.shared_pool
+            if message["receiver"] == receiver
+        ]
+
+        self.log_event(
+            MASEvent.create(
+                event_type="pool_read",
+
+                receiver=receiver,
+
+                content=(
+                    f"{receiver} retrieved messages "
+                    f"from shared pool"
+                ),
+
+                metadata={
+                    "topology":
+                        self.topology_name,
+
+                    "message_count":
+                        len(messages),
+
+                    "pool_size":
+                        len(self.shared_pool)
+                }
+            )
+        )
+
+        return messages
+
+    # =========================================================
     # TOOL REQUEST ROUTING
     # =========================================================
 
@@ -353,9 +554,19 @@ class MASEnvironment:
         Route a tool request through the Coordinator.
 
         Full tool arguments are NOT stored in the event log.
-        Only argument names and basic metadata are recorded.
 
-        Full arguments are still passed to the ToolManager.
+        Only:
+
+            argument_keys
+            argument_count
+            result_count
+            result_type
+            status
+
+        are recorded.
+
+        Full arguments are still passed internally
+        to the ToolManager.
         """
 
         request_id = str(
@@ -373,19 +584,27 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="tool_request",
+
                 sender=requesting_agent,
+
                 receiver="coordinator",
+
                 content=(
                     f"{requesting_agent} requested "
                     f"tool '{tool_name}'"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 metadata={
                     "argument_keys":
                         argument_keys,
+
                     "argument_count":
                         len(argument_keys),
+
                     "topology":
                         self.topology_name
                 }
@@ -399,14 +618,20 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="tool_forward",
+
                 sender="coordinator",
+
                 receiver="tool_manager",
+
                 content=(
                     f"Coordinator forwarded "
                     f"'{tool_name}' request"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 metadata={
                     "requesting_agent":
                         requesting_agent,
@@ -430,13 +655,19 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="tool_execution",
+
                 sender="tool_manager",
+
                 receiver=tool_name,
+
                 content=(
                     f"Executing tool '{tool_name}'"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 metadata={
                     "requesting_agent":
                         requesting_agent
@@ -458,20 +689,22 @@ class MASEnvironment:
 
         except Exception as exc:
 
-            # =================================================
-            # TOOL ERROR
-            # =================================================
-
             self.log_event(
                 MASEvent.create(
                     event_type="tool_error",
+
                     sender=tool_name,
+
                     receiver="coordinator",
+
                     content=(
                         f"Tool '{tool_name}' failed"
                     ),
+
                     tool_call=tool_name,
+
                     request_id=request_id,
+
                     metadata={
                         "requesting_agent":
                             requesting_agent,
@@ -497,7 +730,7 @@ class MASEnvironment:
             raise
 
         # =====================================================
-        # TOOL -> COORDINATOR
+        # TOOL RESULT
         # =====================================================
 
         result_count = (
@@ -509,15 +742,22 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="tool_result",
+
                 sender=tool_name,
+
                 receiver="coordinator",
+
                 content=(
                     f"Tool '{tool_name}' completed "
                     f"successfully"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 result_count=result_count,
+
                 metadata={
                     "requesting_agent":
                         requesting_agent,
@@ -541,15 +781,22 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="tool_result_delivery",
+
                 sender="coordinator",
+
                 receiver=requesting_agent,
+
                 content=(
                     f"Tool '{tool_name}' result "
                     f"delivered to {requesting_agent}"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 result_count=result_count,
+
                 metadata={
                     "requesting_agent":
                         requesting_agent,
@@ -564,7 +811,7 @@ class MASEnvironment:
         )
 
         return result
-    
+
     # =========================================================
     # MEMORY WRITE EVENT
     # =========================================================
@@ -587,14 +834,25 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="memory_write",
+
                 sender=agent_name,
+
                 content="Memory written",
+
                 memory_update=memory.memory_id,
+
                 metadata={
                     "importance":
                         importance,
+
                     "agent":
                         agent_name,
+
+                    "content_length":
+                        self._content_length(
+                            content
+                        ),
+
                     **(metadata or {})
                 }
             )
@@ -622,16 +880,21 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="memory_read",
+
                 receiver=agent_name,
+
                 content=(
                     f"Retrieved "
                     f"{len(memories)} memories."
                 ),
+
                 metadata={
                     "query":
                         query,
+
                     "top_k":
                         top_k,
+
                     "memory_count":
                         len(memories),
                 }
@@ -651,51 +914,64 @@ class MASEnvironment:
 
         task = state["task"]
 
-        # -----------------------------------------------------
-        # Task received
-        # -----------------------------------------------------
+        # =====================================================
+        # TASK RECEIVED
+        # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="task_received",
+
                 receiver="coordinator",
-                content=task,
+
+                content="Coordinator received user task",
+
                 metadata={
                     "topology":
-                        self.topology_name
+                        self.topology_name,
+
+                    "task_length":
+                        self._content_length(
+                            task
+                        )
                 }
             )
         )
 
-        # -----------------------------------------------------
-        # Record task in Coordinator memory
-        # -----------------------------------------------------
+        # =====================================================
+        # RECORD TASK IN MEMORY
+        # =====================================================
 
         self.log_memory_write(
             agent_name="coordinator",
+
             content=(
                 f"Received user task: {task}"
             ),
+
             importance=8,
+
             metadata={
                 "event":
                     "task_received"
             }
         )
 
-        # -----------------------------------------------------
-        # Read Coordinator memory
-        # -----------------------------------------------------
+        # =====================================================
+        # READ COORDINATOR MEMORY
+        # =====================================================
 
         self.read_memory(
             agent_name="coordinator",
+
             query=task,
+
             top_k=3
         )
 
-        # -----------------------------------------------------
-        # Create plan
-        # -----------------------------------------------------
+        # =====================================================
+        # CREATE PLAN
+        # =====================================================
 
         try:
 
@@ -708,11 +984,15 @@ class MASEnvironment:
             self.log_event(
                 MASEvent.create(
                     event_type="agent_failure",
+
                     sender="coordinator",
+
                     content=str(e),
+
                     metadata={
                         "stage":
                             "planning",
+
                         "failure_type":
                             "invalid_structured_output"
                     }
@@ -720,29 +1000,48 @@ class MASEnvironment:
             )
 
             return {
-                "plan": None,
-                "error": str(e)
+                "plan":
+                    None,
+
+                "error":
+                    str(e)
             }
 
-        # -----------------------------------------------------
-        # Log plan
-        # -----------------------------------------------------
+        # =====================================================
+        # LOG PLAN WITHOUT FULL CONTENT
+        # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="task_decomposition",
+
                 sender="coordinator",
-                content=str(plan),
+
+                content="Coordinator created task plan",
+
                 metadata={
                     "topology":
-                        self.topology_name
+                        self.topology_name,
+
+                    "plan_stages":
+                        list(plan.keys())
+                        if isinstance(plan, dict)
+                        else [],
+
+                    "stage_count":
+                        len(plan)
+                        if isinstance(plan, dict)
+                        else 0
                 }
             )
         )
 
         return {
-            "plan": plan,
-            "error": None
+            "plan":
+                plan,
+
+            "error":
+                None
         }
 
     # =========================================================
@@ -772,9 +1071,21 @@ class MASEnvironment:
 
         self.send_message(
             sender="coordinator",
+
             receiver="researcher",
+
             content=research_instruction
         )
+
+        # =====================================================
+        # SHARED POOL READ
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            self.read_shared_pool(
+                receiver="researcher"
+            )
 
         # =====================================================
         # RESEARCHER MEMORY
@@ -782,7 +1093,9 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="researcher",
+
             query=research_instruction,
+
             top_k=3
         )
 
@@ -807,8 +1120,10 @@ class MASEnvironment:
             result = self.request_tool(
                 requesting_agent=
                     tool_request["agent"],
+
                 tool_name=
                     tool_request["tool_name"],
+
                 arguments=
                     tool_request["arguments"]
             )
@@ -834,6 +1149,7 @@ class MASEnvironment:
 
         research_result = self.researcher.run(
             research_instruction,
+
             tool_results=tool_results
         )
 
@@ -844,17 +1160,31 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
+
                 sender="researcher",
-                content="Researcher completed research stage",
+
+                content=(
+                    "Researcher completed "
+                    "research stage"
+                ),
+
                 metadata={
                     "stage":
                         "research",
+
                     "topology":
                         self.topology_name,
+
                     "used_external_tools":
                         bool(tool_results),
+
                     "source_count":
-                        len(tool_results)
+                        len(tool_results),
+
+                    "content_length":
+                        self._content_length(
+                            research_result
+                        )
                 }
             )
         )
@@ -865,17 +1195,22 @@ class MASEnvironment:
 
         self.log_memory_write(
             agent_name="researcher",
+
             content=(
                 f"Research result for assignment:\n"
                 f"{research_instruction}\n\n"
                 f"{research_result}"
             ),
+
             importance=7,
+
             metadata={
                 "stage":
                     "research",
+
                 "used_external_tools":
                     bool(tool_results),
+
                 "source_count":
                     len(tool_results)
             }
@@ -928,7 +1263,7 @@ class MASEnvironment:
         ]
 
         # =====================================================
-        # COORDINATOR -> ANALYST
+        # PREPARE ANALYSIS MESSAGE
         # =====================================================
 
         analysis_message = (
@@ -940,11 +1275,56 @@ class MASEnvironment:
             f"{len(research_sources)}"
         )
 
-        self.send_message(
-            sender="coordinator",
-            receiver="analyst",
-            content=analysis_message
-        )
+        # =====================================================
+        # LAYERED
+        #
+        # Researcher -> Analyst
+        # =====================================================
+
+        if self.topology_name == "layered":
+
+            self.send_message(
+                sender="researcher",
+
+                receiver="analyst",
+
+                content=analysis_message
+            )
+
+        # =====================================================
+        # SHARED POOL
+        #
+        # Coordinator publishes to pool.
+        # Analyst reads from pool.
+        # =====================================================
+
+        elif self.topology_name == "shared_pool":
+
+            self.send_message(
+                sender="coordinator",
+
+                receiver="analyst",
+
+                content=analysis_message
+            )
+
+            self.read_shared_pool(
+                receiver="analyst"
+            )
+
+        # =====================================================
+        # CENTRALIZED / DECENTRALIZED
+        # =====================================================
+
+        else:
+
+            self.send_message(
+                sender="coordinator",
+
+                receiver="analyst",
+
+                content=analysis_message
+            )
 
         # =====================================================
         # ANALYST MEMORY
@@ -952,7 +1332,9 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="analyst",
+
             query=analysis_instruction,
+
             top_k=3
         )
 
@@ -1030,8 +1412,14 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
+
                 sender="analyst",
-                content="Analyst completed analysis stage",
+
+                content=(
+                    "Analyst completed "
+                    "analysis stage"
+                ),
+
                 metadata={
                     "stage":
                         "analysis",
@@ -1046,7 +1434,12 @@ class MASEnvironment:
                         len(research_sources),
 
                     "additional_source_count":
-                        len(tool_results)
+                        len(tool_results),
+
+                    "content_length":
+                        self._content_length(
+                            analysis_result
+                        )
                 }
             )
         )
@@ -1124,14 +1517,52 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # COORDINATOR -> EXECUTOR
+        # LAYERED
+        #
+        # Analyst -> Executor
         # =====================================================
 
-        self.send_message(
-            sender="coordinator",
-            receiver="executor",
-            content=execution_message
-        )
+        if self.topology_name == "layered":
+
+            self.send_message(
+                sender="analyst",
+
+                receiver="executor",
+
+                content=execution_message
+            )
+
+        # =====================================================
+        # SHARED POOL
+        # =====================================================
+
+        elif self.topology_name == "shared_pool":
+
+            self.send_message(
+                sender="coordinator",
+
+                receiver="executor",
+
+                content=execution_message
+            )
+
+            self.read_shared_pool(
+                receiver="executor"
+            )
+
+        # =====================================================
+        # CENTRALIZED / DECENTRALIZED
+        # =====================================================
+
+        else:
+
+            self.send_message(
+                sender="coordinator",
+
+                receiver="executor",
+
+                content=execution_message
+            )
 
         # =====================================================
         # EXECUTOR MEMORY
@@ -1139,7 +1570,9 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="executor",
+
             query=execution_instruction,
+
             top_k=3
         )
 
@@ -1214,7 +1647,7 @@ class MASEnvironment:
 
                 sender="executor",
 
-                content="Executor completed execution stage",
+                content=execution_result,
 
                 metadata={
                     "stage":
@@ -1224,7 +1657,12 @@ class MASEnvironment:
                         self.topology_name,
 
                     "used_external_tools":
-                        bool(tool_results)
+                        bool(tool_results),
+
+                    "content_length":
+                        self._content_length(
+                            execution_result
+                        )
                 }
             )
         )
@@ -1279,14 +1717,82 @@ class MASEnvironment:
             )
 
         # =====================================================
-        # EXECUTOR -> COORDINATOR
+        # RETURN COMMUNICATION
         # =====================================================
 
-        self.send_message(
-            sender="executor",
-            receiver="coordinator",
-            content=execution
-        )
+        if self.topology_name == "layered":
+
+            # -------------------------------------------------
+            # Executor -> Analyst
+            # -------------------------------------------------
+
+            self.send_message(
+                sender="executor",
+
+                receiver="analyst",
+
+                content=execution
+            )
+
+            # -------------------------------------------------
+            # Analyst -> Researcher
+            # -------------------------------------------------
+
+            self.send_message(
+                sender="analyst",
+
+                receiver="researcher",
+
+                content=execution
+            )
+
+            # -------------------------------------------------
+            # Researcher -> Coordinator
+            # -------------------------------------------------
+
+            self.send_message(
+                sender="researcher",
+
+                receiver="coordinator",
+
+                content=execution
+            )
+
+        elif self.topology_name == "shared_pool":
+
+            # -------------------------------------------------
+            # Executor -> Shared Pool
+            # -------------------------------------------------
+
+            self.send_message(
+                sender="executor",
+
+                receiver="coordinator",
+
+                content=execution
+            )
+
+            # -------------------------------------------------
+            # Coordinator reads result
+            # -------------------------------------------------
+
+            self.read_shared_pool(
+                receiver="coordinator"
+            )
+
+        else:
+
+            # -------------------------------------------------
+            # Centralized / Decentralized
+            # -------------------------------------------------
+
+            self.send_message(
+                sender="executor",
+
+                receiver="coordinator",
+
+                content=execution
+            )
 
         # =====================================================
         # COORDINATOR MEMORY
@@ -1294,7 +1800,9 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="coordinator",
+
             query=state["task"],
+
             top_k=3
         )
 
@@ -1314,11 +1822,22 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="final_result",
+
                 sender="coordinator",
-                content="Coordinator generated final result",
+
+                content=(
+                    "Coordinator generated "
+                    "final result"
+                ),
+
                 metadata={
                     "topology":
-                        self.topology_name
+                        self.topology_name,
+
+                    "content_length":
+                        self._content_length(
+                            final_result
+                        )
                 }
             )
         )
@@ -1357,7 +1876,6 @@ class MASEnvironment:
             "Multi-Agent System Analysis"
         )
 
-        # Keep title reasonably short.
         report_title = (
             "Multi-Agent System Analysis Report"
         )
@@ -1389,8 +1907,7 @@ class MASEnvironment:
         # =====================================================
         # COORDINATOR -> REPORT WRITER
         #
-        # We route this through the same ToolManager
-        # mechanism used by all other tools.
+        # Routed through ToolManager.
         # =====================================================
 
         report_result = self.request_tool(
@@ -1418,7 +1935,10 @@ class MASEnvironment:
 
                 content=(
                     f"Report created: "
-                    f"{report_result.get('filename', 'unknown')}"
+                    f"{report_result.get(
+                        'filename',
+                        'unknown'
+                    )}"
                 ),
 
                 tool_call="report_writer",
@@ -1457,9 +1977,9 @@ class MASEnvironment:
             MASState
         )
 
-        # -----------------------------------------------------
-        # Nodes
-        # -----------------------------------------------------
+        # =====================================================
+        # NODES
+        # =====================================================
 
         workflow.add_node(
             "coordinator",
@@ -1491,9 +2011,9 @@ class MASEnvironment:
             self.report_writer_node
         )
 
-        # -----------------------------------------------------
-        # Edges
-        # -----------------------------------------------------
+        # =====================================================
+        # EXECUTION EDGES
+        # =====================================================
 
         workflow.add_edge(
             START,
@@ -1530,9 +2050,9 @@ class MASEnvironment:
             END
         )
 
-        # -----------------------------------------------------
-        # Compile
-        # -----------------------------------------------------
+        # =====================================================
+        # COMPILE
+        # =====================================================
 
         return workflow.compile()
 
@@ -1545,15 +2065,23 @@ class MASEnvironment:
         task: str
     ):
 
-        # -----------------------------------------------------
-        # Clear event log for this episode
-        # -----------------------------------------------------
+        # =====================================================
+        # CLEAR EVENT LOG
+        # =====================================================
 
         self.events = []
 
-        # -----------------------------------------------------
-        # Initial LangGraph state
-        # -----------------------------------------------------
+        # =====================================================
+        # CLEAR SHARED POOL
+        #
+        # Each execute_task() represents a new episode.
+        # =====================================================
+
+        self.shared_pool = []
+
+        # =====================================================
+        # INITIAL LANGGRAPH STATE
+        # =====================================================
 
         initial_state: MASState = {
 
@@ -1585,9 +2113,9 @@ class MASEnvironment:
                 None,
         }
 
-        # -----------------------------------------------------
-        # Execute graph
-        # -----------------------------------------------------
+        # =====================================================
+        # EXECUTE GRAPH
+        # =====================================================
 
         result = self.graph.invoke(
             initial_state

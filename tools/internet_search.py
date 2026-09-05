@@ -2,7 +2,9 @@ import os
 from typing import List, Dict
 
 import requests
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class InternetSearchTool:
 

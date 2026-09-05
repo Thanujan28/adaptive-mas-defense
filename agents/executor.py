@@ -493,37 +493,9 @@ If no tool is required:
     # CREATE TOOL REQUEST
     # =========================================================
 
-    def create_tool_request(
-        self,
-        execution_instruction: str,
-        analysis: str
-    ):
-        """
-        Create an optional tool request.
+    def create_tool_request(self, execution_instruction, analysis):
 
-        The Executor does not execute tools directly.
-        """
-
-        decision = self.decide_tool(
-            execution_instruction=execution_instruction,
-            analysis=analysis
-        )
-
-        if not decision.get(
-            "need_tool"
-        ):
-
-            return None
-
-        return {
-            "agent": self.name,
-            "tool_name": decision[
-                "tool_name"
-            ],
-            "arguments": decision[
-                "arguments"
-            ]
-        }
+        return None
 
     # =========================================================
     # RUN
