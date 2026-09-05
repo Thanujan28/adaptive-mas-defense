@@ -1,6 +1,8 @@
 import uuid
 from typing import TypedDict, Optional
 
+import networkx as nx
+
 from langgraph.graph import StateGraph, START, END
 
 from agents.coordinator import CoordinatorAgent
@@ -150,6 +152,11 @@ class MASEnvironment:
             "researcher",
             "executor",
         ]
+
+        self.agent_mailboxes = {
+            agent: []
+            for agent in self.agent_names
+        }
 
         # =====================================================
         # MEMORY SYSTEM
@@ -342,95 +349,311 @@ class MASEnvironment:
     # COMMUNICATION
     # =========================================================
 
+    # =========================================================
+# COMMUNICATION
+# =========================================================
+
     def send_message(
         self,
         sender: str,
         receiver: str,
-        content: str
+        content: str,
+        metadata=None
     ):
         """
-        Send information according to the active topology.
+        Deliver a message through the active communication topology.
 
-        For layered, centralized, and decentralized configurations,
-        communication must follow an explicitly permitted direct edge.
+        Normal topologies:
+            Delivery is permitted only when NetworkX contains
+            the corresponding directed edge.
 
-        For shared_pool, the message is written to the shared
-        communication pool and is not routed through another agent.
+        Shared pool:
+            Message is written to the shared pool and becomes
+            readable only by the intended receiver.
         """
 
         if sender not in self.agent_names:
-            raise ValueError(f"Unknown sender: {sender}")
+            raise ValueError(
+                f"Unknown sender: {sender}"
+            )
 
         if receiver not in self.agent_names:
-            raise ValueError(f"Unknown receiver: {receiver}")
+            raise ValueError(
+                f"Unknown receiver: {receiver}"
+            )
 
-        # ---------------------------------------------
-        # Shared Pool
-        # ---------------------------------------------
+        if content is None:
+            raise ValueError(
+                "Message content cannot be None."
+            )
+
+        message_id = str(
+            uuid.uuid4()
+        )
+
+        message = {
+            "message_id": message_id,
+            "sender": sender,
+            "receiver": receiver,
+            "content": content,
+            "topology": self.topology_name,
+            "metadata": metadata or {},
+        }
+
+        # =====================================================
+        # SHARED POOL
+        # =====================================================
 
         if self.topology_name == "shared_pool":
 
-            message = {
-                "message_id": str(uuid.uuid4()),
-                "sender": sender,
-                "receiver": receiver,
-                "content": content,
-            }
-
-            self.shared_pool.append(message)
+            self.shared_pool.append(
+                message
+            )
 
             self.log_event(
                 MASEvent.create(
                     event_type="pool_write",
+
                     sender=sender,
+
                     receiver="shared_pool",
-                    content=f"{sender} published message to shared pool",
+
+                    content=(
+                        f"{sender} published a message "
+                        f"for {receiver}"
+                    ),
+
                     metadata={
-                        "topology": "shared_pool",
-                        "target_agent": receiver,
+                        "message_id":
+                            message_id,
+
+                        "target_agent":
+                            receiver,
+
+                        "topology":
+                            "shared_pool",
+
                         "content_length":
-                            self._content_length(content),
+                            self._content_length(
+                                content
+                            ),
+
                         "pool_size":
                             len(self.shared_pool),
-                        "message_id":
-                            message["message_id"],
                     }
                 )
             )
 
-            return content
+            return message
 
-        # ---------------------------------------------
-        # Agent-to-agent communication
-        # ---------------------------------------------
+        # =====================================================
+        # DIRECT AGENT COMMUNICATION
+        # =====================================================
 
         if not self.topology.can_communicate(
             sender,
             receiver
         ):
             raise ValueError(
-                f"Communication not allowed: "
+                f"Communication not allowed under "
+                f"{self.topology_name}: "
                 f"{sender} -> {receiver}"
             )
+
+        self.agent_mailboxes[
+            receiver
+        ].append(message)
 
         self.log_event(
             MASEvent.create(
                 event_type="message",
+
                 sender=sender,
+
                 receiver=receiver,
+
                 content=(
                     f"{sender} sent message "
                     f"to {receiver}"
                 ),
+
                 metadata={
-                    "topology": self.topology_name,
+                    "message_id":
+                        message_id,
+
+                    "topology":
+                        self.topology_name,
+
                     "content_length":
-                        self._content_length(content)
+                        self._content_length(
+                            content
+                        ),
+
+                    "mailbox_size":
+                        len(
+                            self.agent_mailboxes[
+                                receiver
+                            ]
+                        ),
+
+                    **(
+                        metadata
+                        or {}
+                    )
                 }
             )
         )
 
-        return content
+        return message
+
+
+    # =========================================================
+    # RECEIVE AGENT MESSAGE
+    # =========================================================
+
+    def receive_agent_message(
+        self,
+        receiver: str,
+        expected_sender=None
+    ):
+        """
+        Retrieve the oldest unread topology-delivered message.
+
+        Communication is consumed from the receiving agent's
+        mailbox. Agent outputs are therefore never obtained
+        from LangGraph state.
+        """
+
+        if receiver not in self.agent_names:
+            raise ValueError(
+                f"Unknown receiver: {receiver}"
+            )
+
+        # =====================================================
+        # SHARED POOL
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            messages = [
+                message
+                for message in self.shared_pool
+                if message["receiver"] == receiver
+                and (
+                    expected_sender is None
+                    or message["sender"]
+                    == expected_sender
+                )
+            ]
+
+            if not messages:
+                return None
+
+            message = messages[0]
+
+            self.shared_pool.remove(
+                message
+            )
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="pool_read",
+
+                    receiver=receiver,
+
+                    content=(
+                        f"{receiver} retrieved "
+                        f"a message from "
+                        f"{message['sender']}"
+                    ),
+
+                    metadata={
+                        "message_id":
+                            message["message_id"],
+
+                        "sender":
+                            message["sender"],
+
+                        "topology":
+                            "shared_pool",
+
+                        "remaining_pool_size":
+                            len(self.shared_pool),
+                    }
+                )
+            )
+
+            return message["content"]
+
+        # =====================================================
+        # NORMAL TOPOLOGIES
+        # =====================================================
+
+        mailbox = self.agent_mailboxes[
+            receiver
+        ]
+
+        for index, message in enumerate(
+            mailbox
+        ):
+
+            if (
+                expected_sender is None
+                or message["sender"]
+                == expected_sender
+            ):
+
+                message = mailbox.pop(
+                    index
+                )
+
+                self.log_event(
+                    MASEvent.create(
+                        event_type="message_receive",
+
+                        sender=message[
+                            "sender"
+                        ],
+
+                        receiver=receiver,
+
+                        content=(
+                            f"{receiver} received "
+                            f"a message from "
+                            f"{message['sender']}"
+                        ),
+
+                        metadata={
+                            "message_id":
+                                message[
+                                    "message_id"
+                                ],
+
+                            "topology":
+                                self.topology_name,
+
+                            "content_length":
+                                self._content_length(
+                                    message[
+                                        "content"
+                                    ]
+                                ),
+
+                            "remaining_mailbox_size":
+                                len(mailbox),
+                        }
+                    )
+                )
+
+                return message[
+                    "content"
+                ]
+
+        return None
+
+
+
+    
 
     # =========================================================
     # SHARED POOL READ
@@ -591,6 +814,96 @@ class MASEnvironment:
         # =====================================================
         # TOOL CONTROL PLANE
         # =====================================================
+
+        if (
+            self.topology_name == "centralized"
+            and requesting_agent != "coordinator"
+        ):
+
+            self.publish_agent_result(
+                sender=requesting_agent,
+                receiver="coordinator",
+                content={
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                },
+                metadata={
+                    "message_type": "tool_request",
+                    "request_id": request_id,
+                },
+            )
+
+            routed_request = self.receive_agent_message(
+                receiver="coordinator",
+                expected_sender=requesting_agent,
+            )
+
+            result = self.coordinator.handle_tool_request(
+                agent=requesting_agent,
+                tool_name=routed_request["tool_name"],
+                arguments=routed_request["arguments"],
+            )
+
+            self.publish_agent_result(
+                sender="coordinator",
+                receiver=requesting_agent,
+                content=result,
+                metadata={
+                    "message_type": "tool_result",
+                    "request_id": request_id,
+                },
+            )
+
+            result = self.receive_agent_message(
+                receiver=requesting_agent,
+                expected_sender="coordinator",
+            )
+
+            result_count = (
+                len(result)
+                if isinstance(result, list)
+                else 1
+            )
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="tool_result",
+
+                    sender="coordinator",
+
+                    receiver=requesting_agent,
+
+                    content=(
+                        f"Tool '{tool_name}' completed "
+                        f"successfully"
+                    ),
+
+                    tool_call=tool_name,
+
+                    request_id=request_id,
+
+                    result_count=result_count,
+
+                    metadata={
+                        "requesting_agent":
+                            requesting_agent,
+
+                        "result_type":
+                            type(result).__name__,
+
+                        "result_count":
+                            result_count,
+
+                        "status":
+                            "success",
+
+                        "routed_by":
+                            "coordinator"
+                    }
+                )
+            )
+
+            return result
 
         self.log_event(
             MASEvent.create(
@@ -1020,6 +1333,15 @@ class MASEnvironment:
             )
         )
 
+        self.publish_agent_result(
+            sender="coordinator",
+            receiver="researcher",
+            content=plan["research"],
+            metadata={
+                "stage": "research_assignment"
+            }
+        )
+
         return {
             "plan": plan,
             "error": None
@@ -1041,55 +1363,47 @@ class MASEnvironment:
 
         Communication:
 
-            Coordinator -> Researcher
-
-        After research:
-
             Layered:
+                Coordinator -> Researcher
                 Researcher -> Analyst
 
             Centralized:
-                Researcher -> Coordinator
-                Coordinator -> Analyst
+                Coordinator -> Researcher
+                Researcher -> Coordinator -> Analyst
 
             Decentralized:
+                Coordinator -> Researcher
                 Researcher -> Analyst
 
             Shared Pool:
+                Coordinator -> Pool -> Researcher
                 Researcher -> Pool -> Analyst
         """
 
-        plan = state["plan"]
-
-        if plan is None:
-
-            raise ValueError(
-                "Research node received no plan."
-            )
-
-        research_instruction = plan[
-            "research"
-        ]
-
         # =====================================================
-        # COORDINATOR -> RESEARCHER
+        # RECEIVE COORDINATOR INSTRUCTION
         # =====================================================
 
-        self.send_message(
-            sender="coordinator",
+        research_instruction = self.receive_agent_message(
             receiver="researcher",
-            content=research_instruction
+            expected_sender="coordinator"
         )
+
+        if research_instruction is None:
+            raise ValueError(
+                "Researcher received no research instruction."
+            )
 
         # =====================================================
         # SHARED POOL READ
         # =====================================================
 
-        if self.topology_name == "shared_pool":
-
-            self.read_shared_pool(
-                receiver="researcher"
-            )
+        # NOTE:
+        # receive_agent_message() should already perform the
+        # pool read for shared_pool.
+        #
+        # Therefore DO NOT call read_shared_pool() separately
+        # if receive_agent_message() handles it.
 
         # =====================================================
         # RESEARCHER MEMORY
@@ -1097,9 +1411,7 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="researcher",
-
             query=research_instruction,
-
             top_k=3
         )
 
@@ -1124,34 +1436,22 @@ class MASEnvironment:
             try:
 
                 result = self.request_tool(
-                    requesting_agent=
-                        tool_request["agent"],
-
-                    tool_name=
-                        tool_request["tool_name"],
-
-                    arguments=
-                        tool_request["arguments"]
+                    requesting_agent=tool_request["agent"],
+                    tool_name=tool_request["tool_name"],
+                    arguments=tool_request["arguments"]
                 )
 
             except PermissionError:
 
                 result = []
 
-            if isinstance(
-                result,
-                list
-            ):
+            if isinstance(result, list):
 
-                tool_results.extend(
-                    result
-                )
+                tool_results.extend(result)
 
             else:
 
-                tool_results.append(
-                    result
-                )
+                tool_results.append(result)
 
         # =====================================================
         # RESEARCHER EXECUTION
@@ -1159,7 +1459,6 @@ class MASEnvironment:
 
         research_result = self.researcher.run(
             research_instruction,
-
             tool_results=tool_results
         )
 
@@ -1170,31 +1469,19 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
-
                 sender="researcher",
-
                 content=(
                     "Researcher completed "
                     "research stage"
                 ),
-
                 metadata={
-                    "stage":
-                        "research",
-
-                    "topology":
-                        self.topology_name,
-
-                    "used_external_tools":
-                        bool(tool_results),
-
-                    "source_count":
-                        len(tool_results),
-
-                    "content_length":
-                        self._content_length(
-                            research_result
-                        )
+                    "stage": "research",
+                    "topology": self.topology_name,
+                    "used_external_tools": bool(tool_results),
+                    "source_count": len(tool_results),
+                    "content_length": self._content_length(
+                        research_result
+                    )
                 }
             )
         )
@@ -1205,76 +1492,46 @@ class MASEnvironment:
 
         self.log_memory_write(
             agent_name="researcher",
-
             content=(
                 f"Research result for assignment:\n"
                 f"{research_instruction}\n\n"
                 f"{research_result}"
             ),
-
             importance=7,
-
             metadata={
-                "stage":
-                    "research",
-
-                "used_external_tools":
-                    bool(tool_results),
-
-                "source_count":
-                    len(tool_results)
+                "stage": "research",
+                "used_external_tools": bool(tool_results),
+                "source_count": len(tool_results)
             }
         )
 
         # =====================================================
         # PUBLISH RESEARCH RESULT
         # =====================================================
-        #
-        # IMPORTANT:
-        #
-        # Do NOT simply assume that:
-        #
-        #     state["research"]
-        #
-        # represents communication.
-        #
-        # The result is explicitly published through the
-        # topology-controlled communication mechanism.
-        # =====================================================
 
         self.publish_agent_result(
             sender="researcher",
-
             receiver="analyst",
-
             content=research_result,
-
             metadata={
-                "stage":
-                    "research",
-
-                "source_count":
-                    len(tool_results)
+                "stage": "research",
+                "source_count": len(tool_results)
             }
         )
 
         # =====================================================
-        # RETURN WORKFLOW STATE
+        # RETURN
         # =====================================================
         #
-        # LangGraph still requires the result to move to the
-        # next node. The actual inter-agent communication event
-        # has already been recorded through publish_agent_result.
+        # IMPORTANT:
+        # Do NOT return research_result.
+        #
+        # Communication happens through the topology layer.
+        #
+        # LangGraph controls execution order only.
         # =====================================================
 
-        return {
-            "research":
-                research_result,
-
-            "research_sources":
-                tool_results
-        }
-
+        return {}
     # =========================================================
     # ANALYST NODE
     # =========================================================
@@ -1290,40 +1547,15 @@ class MASEnvironment:
         """
         Execute the Analyst stage.
 
-        Communication:
-
-            Layered:
-                Researcher -> Analyst
-
-            Centralized:
-                Researcher -> Coordinator -> Analyst
-
-            Decentralized:
-                Researcher -> Analyst
-
-            Shared Pool:
-                Researcher -> Pool -> Analyst
+        Research information is obtained exclusively through
+        the topology-controlled communication mechanism.
         """
 
         plan = state["plan"]
 
-        research = state["research"]
-
-        research_sources = state.get(
-            "research_sources",
-            []
-        )
-
         if plan is None:
-
             raise ValueError(
                 "Analysis node received no plan."
-            )
-
-        if research is None:
-
-            raise ValueError(
-                "Analysis node received no research result."
             )
 
         analysis_instruction = plan[
@@ -1333,55 +1565,35 @@ class MASEnvironment:
         # =====================================================
         # RECEIVE RESEARCH RESULT
         # =====================================================
-        #
-        # The communication path was established by the
-        # Researcher node.
-        #
-        # For Shared Pool we explicitly read the message here.
-        # =====================================================
 
-        if self.topology_name == "shared_pool":
+        research = self.receive_agent_message(
+            receiver="analyst",
+            expected_sender=(
+                "coordinator"
+                if self.topology_name == "centralized"
+                else "researcher"
+            )
+        )
 
-            research_message = (
-                self.receive_agent_message(
-                    receiver="analyst",
-                    expected_sender="researcher"
-                )
+        if research is None:
+            raise ValueError(
+                "Analyst received no research message."
             )
 
-            if research_message is not None:
-
-                research = research_message
-
         # =====================================================
-        # CENTRALIZED COMMUNICATION
+        # RESEARCH SOURCE COUNT
         # =====================================================
         #
-        # Researcher -> Coordinator -> Analyst
+        # Source contents are no longer carried through
+        # LangGraph state. The analyst therefore receives
+        # only the published research result.
         #
-        # publish_agent_result() already records both hops.
+        # If source metadata is required experimentally,
+        # transmit it explicitly as message metadata rather
+        # than through hidden state.
         # =====================================================
 
-        elif self.topology_name == "centralized":
-
-            # The research result has already been published
-            # as:
-            #
-            # Researcher -> Coordinator
-            # Coordinator -> Analyst
-
-            pass
-
-        # =====================================================
-        # LAYERED / DECENTRALIZED
-        # =====================================================
-        #
-        # Researcher -> Analyst
-        # =====================================================
-
-        else:
-
-            pass
+        research_sources = []
 
         # =====================================================
         # PREPARE ANALYSIS INPUT
@@ -1391,9 +1603,7 @@ class MASEnvironment:
             f"Analysis assignment:\n"
             f"{analysis_instruction}\n\n"
             f"Research findings:\n"
-            f"{research}\n\n"
-            f"Research sources available: "
-            f"{len(research_sources)}"
+            f"{research}"
         )
 
         # =====================================================
@@ -1402,9 +1612,7 @@ class MASEnvironment:
 
         self.read_memory(
             agent_name="analyst",
-
             query=analysis_instruction,
-
             top_k=3
         )
 
@@ -1427,10 +1635,6 @@ class MASEnvironment:
 
         tool_results = []
 
-        # =====================================================
-        # OPTIONAL ADDITIONAL TOOL REQUEST
-        # =====================================================
-
         if tool_request:
 
             try:
@@ -1450,10 +1654,7 @@ class MASEnvironment:
 
                 result = []
 
-            if isinstance(
-                result,
-                list
-            ):
+            if isinstance(result, list):
 
                 tool_results.extend(
                     result
@@ -1506,12 +1707,6 @@ class MASEnvironment:
                     "used_external_tools":
                         bool(tool_results),
 
-                    "research_source_count":
-                        len(research_sources),
-
-                    "additional_source_count":
-                        len(tool_results),
-
                     "content_length":
                         self._content_length(
                             analysis_result
@@ -1541,57 +1736,31 @@ class MASEnvironment:
                     "analysis",
 
                 "used_external_tools":
-                    bool(tool_results),
-
-                "research_source_count":
-                    len(research_sources),
-
-                "additional_source_count":
-                    len(tool_results)
+                    bool(tool_results)
             }
         )
 
         # =====================================================
         # PUBLISH ANALYSIS RESULT
         # =====================================================
-        #
-        # Layered:
-        #     Analyst -> Executor
-        #
-        # Centralized:
-        #     Analyst -> Coordinator -> Executor
-        #
-        # Decentralized:
-        #     Analyst -> Executor
-        #
-        # Shared Pool:
-        #     Analyst -> Pool -> Executor
-        # =====================================================
 
         self.publish_agent_result(
             sender="analyst",
-
             receiver="executor",
-
             content=analysis_result,
-
             metadata={
                 "stage":
-                    "analysis",
-
-                "research_source_count":
-                    len(research_sources),
-
-                "additional_source_count":
-                    len(tool_results)
+                    "analysis"
             }
         )
 
-        return {
-            "analysis":
-                analysis_result
-        }
-    # =========================================================
+        # =====================================================
+        # RETURN ORCHESTRATION STATE ONLY
+        # =====================================================
+
+        return {}
+  
+   # =========================================================
     # EXECUTOR NODE
     # =========================================================
 
@@ -1599,26 +1768,47 @@ class MASEnvironment:
         self,
         state: MASState
     ):
+        """
+        Execute the Executor stage.
+
+        The Executor receives Analyst information exclusively
+        through topology-controlled communication.
+
+        The Executor has no direct tool authorization.
+        """
 
         plan = state["plan"]
 
-        analysis = state["analysis"]
-
         if plan is None:
-
             raise ValueError(
                 "Execution node received no plan."
-            )
-
-        if analysis is None:
-
-            raise ValueError(
-                "Execution node received no analysis."
             )
 
         execution_instruction = plan[
             "execution"
         ]
+
+        # =====================================================
+        # RECEIVE ANALYST RESULT
+        # =====================================================
+
+        analysis = self.receive_agent_message(
+            receiver="executor",
+            expected_sender=(
+                "coordinator"
+                if self.topology_name == "centralized"
+                else "analyst"
+            )
+        )
+
+        if analysis is None:
+            raise ValueError(
+                "Executor received no analysis message."
+            )
+
+        # =====================================================
+        # EXECUTION INPUT
+        # =====================================================
 
         execution_message = (
             f"Execution assignment:\n"
@@ -1628,115 +1818,30 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # LAYERED
-        #
-        # Analyst -> Executor
-        # =====================================================
-
-        if self.topology_name == "layered":
-
-            self.send_message(
-                sender="analyst",
-
-                receiver="executor",
-
-                content=execution_message
-            )
-
-        # =====================================================
-        # SHARED POOL
-        # =====================================================
-
-        elif self.topology_name == "shared_pool":
-
-            self.send_message(
-                sender="coordinator",
-
-                receiver="executor",
-
-                content=execution_message
-            )
-
-            self.read_shared_pool(
-                receiver="executor"
-            )
-
-        # =====================================================
-        # CENTRALIZED / DECENTRALIZED
-        # =====================================================
-
-        else:
-
-            self.send_message(
-                sender="coordinator",
-
-                receiver="executor",
-
-                content=execution_message
-            )
-
-        # =====================================================
         # EXECUTOR MEMORY
         # =====================================================
 
         self.read_memory(
             agent_name="executor",
-
             query=execution_instruction,
-
             top_k=3
         )
 
         # =====================================================
-        # EXECUTOR DECIDES WHETHER TOOL IS REQUIRED
+        # IMPORTANT:
+        # EXECUTOR HAS NO TOOL ACCESS
         # =====================================================
-
-        tool_request = (
-            self.executor.create_tool_request(
-                execution_instruction=
-                    execution_instruction,
-
-                analysis=
-                    analysis
-            )
-        )
+        #
+        # Do NOT call:
+        #
+        #     self.executor.create_tool_request()
+        #
+        # and do NOT call request_tool() from the Executor.
+        #
+        # Tool authorization remains topology-independent.
+        # =====================================================
 
         tool_results = []
-
-        # =====================================================
-        # TOOL REQUEST
-        # =====================================================
-
-        if tool_request:
-
-            try:
-                result = self.request_tool(
-                    requesting_agent=
-                        tool_request["agent"],
-
-                    tool_name=
-                        tool_request["tool_name"],
-
-                    arguments=
-                        tool_request["arguments"]
-                )
-            except PermissionError:
-                result = []
-
-            if isinstance(
-                result,
-                list
-            ):
-
-                tool_results.extend(
-                    result
-                )
-
-            else:
-
-                tool_results.append(
-                    result
-                )
 
         # =====================================================
         # EXECUTOR RUN
@@ -1747,8 +1852,7 @@ class MASEnvironment:
 
             analysis,
 
-            tool_results=
-                tool_results
+            tool_results=tool_results
         )
 
         # =====================================================
@@ -1771,7 +1875,7 @@ class MASEnvironment:
                         self.topology_name,
 
                     "used_external_tools":
-                        bool(tool_results),
+                        False,
 
                     "content_length":
                         self._content_length(
@@ -1802,15 +1906,30 @@ class MASEnvironment:
                     "execution",
 
                 "used_external_tools":
-                    bool(tool_results)
+                    False
             }
         )
 
-        return {
-            "execution":
-                execution_result
-        }
+        # =====================================================
+        # RETURN RESULT THROUGH COMMUNICATION
+        # =====================================================
 
+        self.publish_agent_result(
+            sender="executor",
+            receiver="coordinator",
+            content=execution_result,
+            metadata={
+                "stage":
+                    "execution"
+            }
+        )
+
+        # =====================================================
+        # RETURN ORCHESTRATION STATE ONLY
+        # =====================================================
+
+        return {}
+   
     # =========================================================
     # FINAL COORDINATOR NODE
     # =========================================================
@@ -1819,93 +1938,29 @@ class MASEnvironment:
         self,
         state: MASState
     ):
+        """
+        Final Coordinator stage.
 
-        execution = state[
-            "execution"
-        ]
+        The Coordinator receives the Executor result through
+        the communication topology rather than LangGraph state.
+        """
+
+        # =====================================================
+        # RECEIVE EXECUTION RESULT
+        # =====================================================
+
+        execution = self.receive_agent_message(
+            receiver="coordinator",
+            expected_sender=(
+                "researcher"
+                if self.topology_name == "layered"
+                else "executor"
+            )
+        )
 
         if execution is None:
-
             raise ValueError(
-                "Final node received no execution result."
-            )
-
-        # =====================================================
-        # RETURN COMMUNICATION
-        # =====================================================
-
-        if self.topology_name == "layered":
-
-            # -------------------------------------------------
-            # Executor -> Analyst
-            # -------------------------------------------------
-
-            self.send_message(
-                sender="executor",
-
-                receiver="analyst",
-
-                content=execution
-            )
-
-            # -------------------------------------------------
-            # Analyst -> Researcher
-            # -------------------------------------------------
-
-            self.send_message(
-                sender="analyst",
-
-                receiver="researcher",
-
-                content=execution
-            )
-
-            # -------------------------------------------------
-            # Researcher -> Coordinator
-            # -------------------------------------------------
-
-            self.send_message(
-                sender="researcher",
-
-                receiver="coordinator",
-
-                content=execution
-            )
-
-        elif self.topology_name == "shared_pool":
-
-            # -------------------------------------------------
-            # Executor -> Shared Pool
-            # -------------------------------------------------
-
-            self.send_message(
-                sender="executor",
-
-                receiver="coordinator",
-
-                content=execution
-            )
-
-            # -------------------------------------------------
-            # Coordinator reads result
-            # -------------------------------------------------
-
-            self.read_shared_pool(
-                receiver="coordinator"
-            )
-
-        else:
-
-            # -------------------------------------------------
-            # Centralized / Decentralized
-            # -------------------------------------------------
-
-            self.send_message(
-                sender="executor",
-
-                receiver="coordinator",
-
-                content=execution
+                "Coordinator received no execution result."
             )
 
         # =====================================================
@@ -1960,7 +2015,6 @@ class MASEnvironment:
             "final_result":
                 final_result
         }
-
     # =========================================================
     # REPORT WRITER NODE
     # =========================================================
@@ -2170,101 +2224,97 @@ class MASEnvironment:
 
         return workflow.compile()
 
+    # =========================================================
+# PUBLISH AGENT RESULT
+# =========================================================
+
     def publish_agent_result(
         self,
-        sender: str,
-        receiver: str,
-        content: str,
+        sender,
+        receiver,
+        content,
         metadata=None
     ):
         """
-        Deliver agent-produced information through
-        the active communication mechanism.
-
-        This function ensures that information crossing
-        agent boundaries is represented as communication.
+        Publish an agent result according to the active communication topology.
         """
 
         if self.topology_name == "shared_pool":
-
-            message = {
-                "message_id": str(uuid.uuid4()),
-                "sender": sender,
-                "receiver": receiver,
-                "content": content,
-                "metadata": metadata or {},
-            }
-
-            self.shared_pool.append(message)
-
-            self.log_event(
-                MASEvent.create(
-                    event_type="pool_write",
-                    sender=sender,
-                    receiver="shared_pool",
-                    content=(
-                        f"{sender} published result "
-                        f"for {receiver}"
-                    ),
-                    metadata={
-                        "topology": "shared_pool",
-                        "target_agent": receiver,
-                        "message_id":
-                            message["message_id"],
-                        "content_length":
-                            self._content_length(content),
-                        **(metadata or {})
-                    }
-                )
-            )
-
-            return message
-
-        # -----------------------------------------------------
-        # Direct topology
-        # -----------------------------------------------------
-
-        if not self.topology.can_communicate(
-            sender,
-            receiver
-        ):
-            raise ValueError(
-                f"Communication not allowed: "
-                f"{sender} -> {receiver}"
-            )
-
-        self.log_event(
-            MASEvent.create(
-                event_type="message",
-
+            return self.send_message(
                 sender=sender,
-
                 receiver=receiver,
-
-                content=(
-                    f"{sender} delivered result "
-                    f"to {receiver}"
-                ),
-
-                metadata={
-                    "topology":
-                        self.topology_name,
-
-                    "content_length":
-                        self._content_length(content),
-
-                    **(metadata or {})
-                }
+                content=content,
+                metadata=metadata
             )
-        )
 
-        return {
-            "sender": sender,
-            "receiver": receiver,
-            "content": content,
-            "metadata": metadata or {}
-        }
+        elif self.topology_name == "centralized":
 
+            # Sender sends result to Coordinator.
+            if sender != "coordinator":
+                self.send_message(
+                    sender=sender,
+                    receiver="coordinator",
+                    content=content,
+                    metadata=metadata
+                )
+
+            # Coordinator forwards the information to the destination agent.
+            if receiver != "coordinator":
+                self.send_message(
+                    sender="coordinator",
+                    receiver=receiver,
+                    content=content,
+                    metadata=metadata
+                )
+
+            return content
+
+        elif self.topology_name == "layered":
+
+            if self.topology.can_communicate(
+                sender,
+                receiver
+            ):
+                return self.send_message(
+                    sender=sender,
+                    receiver=receiver,
+                    content=content,
+                    metadata=metadata
+                )
+
+            path = nx.shortest_path(
+                self.topology.get_graph(),
+                sender,
+                receiver
+            )
+
+            for current, next_agent in zip(
+                path,
+                path[1:]
+            ):
+                self.send_message(
+                    sender=current,
+                    receiver=next_agent,
+                    content=content,
+                    metadata=metadata
+                )
+
+                if next_agent != receiver:
+                    content = self.receive_agent_message(
+                        receiver=next_agent,
+                        expected_sender=current
+                    )
+
+            return content
+
+        else:
+            # Decentralized
+            return self.send_message(
+                sender=sender,
+                receiver=receiver,
+                content=content,
+                metadata=metadata
+            )
     # =========================================================
     # EXECUTE TASK
     # =========================================================
@@ -2273,6 +2323,10 @@ class MASEnvironment:
         self,
         task: str
     ):
+        self.agent_mailboxes = {
+        agent: []
+        for agent in self.agent_names
+    }
 
         # =====================================================
         # CLEAR EVENT LOG
