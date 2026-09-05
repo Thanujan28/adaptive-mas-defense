@@ -1,5 +1,6 @@
 
 from agents.llm import get_llm
+from tools.tool_request import ToolRequest
 import json
 
 
@@ -9,7 +10,8 @@ class CoordinatorAgent:
         self,
         name="coordinator",
         memory=None,
-        tool_manager=None
+        tool_manager=None,
+        tool_control_plane=None
     ):
 
         self.name = name
@@ -21,6 +23,7 @@ class CoordinatorAgent:
         # The Coordinator is a routing layer.
         # It does NOT decide which tool an agent needs.
         self.tool_manager = tool_manager
+        self.tool_control_plane = tool_control_plane
 
     # ============================================================
     # MEMORY
@@ -87,6 +90,13 @@ class CoordinatorAgent:
 
         self.tool_manager = tool_manager
 
+    def set_tool_control_plane(
+        self,
+        tool_control_plane
+    ):
+
+        self.tool_control_plane = tool_control_plane
+
     # ============================================================
     # TOOL REQUEST
     # ============================================================
@@ -98,7 +108,8 @@ class CoordinatorAgent:
         arguments: dict
     ):
         """
-        Route a tool request from an agent to the ToolManager.
+        Route a centralized tool request from an agent through the
+        Tool Control Plane to the ToolManager.
 
         IMPORTANT:
 
@@ -106,7 +117,7 @@ class CoordinatorAgent:
 
         The requesting agent makes that decision.
 
-        Flow:
+        Centralized flow:
 
             Agent
               ↓
@@ -130,7 +141,10 @@ class CoordinatorAgent:
         # Validate ToolManager
         # --------------------------------------------------------
 
-        if self.tool_manager is None:
+        if (
+            self.tool_manager is None
+            and self.tool_control_plane is None
+        ):
 
             raise RuntimeError(
                 "Coordinator has no ToolManager configured."
@@ -183,11 +197,23 @@ class CoordinatorAgent:
         # Forward request to ToolManager
         # --------------------------------------------------------
 
-        result = self.tool_manager.execute(
+        request = ToolRequest(
             agent=agent,
             tool_name=tool_name,
-            arguments=arguments
+            arguments=arguments,
         )
+
+        if self.tool_control_plane is not None:
+            result = self.tool_control_plane.submit(
+                request,
+                submitted_by=self.name,
+            )
+        else:
+            result = self.tool_manager.execute(
+                agent=agent,
+                tool_name=tool_name,
+                arguments=arguments
+            )
 
         # --------------------------------------------------------
         # Return result to requesting agent

@@ -34,55 +34,75 @@ class ToolManager:
         # =====================================================
 
         self.permissions = {
-
-            # -------------------------------------------------
-            # Coordinator
-            # -------------------------------------------------
-            #
-            # Coordinator can:
-            #   - search the Internet
-            #   - search academic sources
-            #   - create final reports
-            #
-            "coordinator": [
-                "internet_search",
-                "academic_search",
-                "report_writer",
-            ],
-
-            # -------------------------------------------------
-            # Researcher
-            # -------------------------------------------------
-            #
-            # Researcher is responsible for information
-            # gathering.
-            #
-            "researcher": [
-                "internet_search",
-                "academic_search",
-            ],
-
-            # -------------------------------------------------
-            # Analyst
-            # -------------------------------------------------
-            #
-            # Analyst can obtain additional evidence when
-            # required.
-            #
-            "analyst": [
-                "internet_search",
-                "academic_search",
-            ],
-
-            # -------------------------------------------------
-            # Executor
-            # -------------------------------------------------
-            #
-            # Executor does not directly access tools.
-            # It produces the final report content.
-            #
-            "executor": [],
+            "centralized": {
+                "coordinator": [
+                    "internet_search",
+                    "academic_search",
+                    "report_writer",
+                ],
+                "researcher": [],
+                "analyst": [],
+                "executor": [],
+            },
+            "decentralized": {
+                "coordinator": [
+                    "internet_search",
+                    "academic_search",
+                    "report_writer",
+                ],
+                "researcher": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "analyst": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "executor": [],
+            },
+            "layered": {
+                "coordinator": [
+                    "internet_search",
+                    "academic_search",
+                    "report_writer",
+                ],
+                "researcher": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "analyst": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "executor": [],
+            },
+            "shared_pool": {
+                "coordinator": [
+                    "internet_search",
+                    "academic_search",
+                    "report_writer",
+                ],
+                "researcher": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "analyst": [
+                    "internet_search",
+                    "academic_search",
+                ],
+                "executor": [],
+            },
         }
+
+        self.current_topology = None
+
+    def set_topology(self, topology_name: str):
+        if topology_name not in self.permissions:
+            raise ValueError(
+                f"Unsupported topology: {topology_name}"
+            )
+
+        self.current_topology = topology_name
 
     # =========================================================
     # PERMISSION CHECK
@@ -94,7 +114,12 @@ class ToolManager:
         tool_name: str
     ) -> bool:
 
-        allowed_tools = self.permissions.get(
+        topology_permissions = self.permissions.get(
+            self.current_topology,
+            {}
+        )
+
+        allowed_tools = topology_permissions.get(
             agent,
             []
         )
@@ -161,8 +186,9 @@ class ToolManager:
         ):
 
             raise PermissionError(
-                f"Agent '{agent}' is not allowed "
-                f"to use tool '{tool_name}'."
+                f"Agent '{agent}' is not authorized "
+                f"to use tool '{tool_name}' "
+                f"in topology '{self.current_topology}'."
             )
 
         # -----------------------------------------------------

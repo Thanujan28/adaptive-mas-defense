@@ -10,6 +10,7 @@ from agents.executor import ExecutorAgent
 
 from tools.tool_manager import ToolManager
 from tools.tool_request import ToolRequest
+from tools.tool_control_plane import ToolControlPlane
 
 from environment.events import MASEvent
 from environment.topology import CommunicationTopology
@@ -118,17 +119,20 @@ class MASEnvironment:
 
     Tool flow:
 
-        Agent
-            ↓
-        Coordinator
-            ↓
-        ToolManager
-            ↓
-        Tool
-            ↓
-        Coordinator
-            ↓
-        Agent
+        Centralized:
+            Agent
+                ↓
+            Coordinator
+                ↓
+            Tool Control Plane
+
+        Layered, decentralized, shared_pool:
+            Agent
+                ↓
+            Tool Control Plane
+
+        Both routes continue through ToolManager and the
+        external tool before returning to the requesting agent.
     """
 
     def __init__(
@@ -160,6 +164,9 @@ class MASEnvironment:
         # =====================================================
 
         self.tool_manager = ToolManager()
+        self.tool_control_plane = ToolControlPlane(
+            self.tool_manager
+        )
 
         # =====================================================
         # AGENTS
@@ -170,7 +177,8 @@ class MASEnvironment:
             memory=self.memory.get_memory(
                 "coordinator"
             ),
-            tool_manager=self.tool_manager
+            tool_manager=self.tool_manager,
+            tool_control_plane=self.tool_control_plane
         )
 
         self.analyst = AnalystAgent(
@@ -210,6 +218,10 @@ class MASEnvironment:
         self.topology = CommunicationTopology.create(
             self.topology_name,
             self.agent_names
+        )
+
+        self.tool_manager.set_topology(
+            self.topology_name
         )
 
         print(
@@ -577,56 +589,121 @@ class MASEnvironment:
             arguments
         )
 
-        # =====================================================
-        # AGENT -> COORDINATOR
-        # =====================================================
+        authorized = self.tool_manager.is_allowed(
+            requesting_agent,
+            tool_name
+        )
+
+        centralized_route = (
+            self.topology_name == "centralized"
+        )
+
+        coordinator_forwardable = (
+            centralized_route
+            and requesting_agent in {
+                "researcher",
+                "analyst",
+            }
+            and tool_name in self.tool_manager.permissions[
+                "centralized"
+            ]["coordinator"]
+        )
+
+        request_authorized = (
+            authorized
+            or coordinator_forwardable
+        )
+
+        request_receiver = (
+            "coordinator"
+            if centralized_route
+            else "tool_control_plane"
+        )
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_request",
-
                 sender=requesting_agent,
-
-                receiver="coordinator",
-
+                receiver=request_receiver,
                 content=(
                     f"{requesting_agent} requested "
                     f"tool '{tool_name}'"
                 ),
-
                 tool_call=tool_name,
-
                 request_id=request_id,
-
                 metadata={
-                    "argument_keys":
-                        argument_keys,
-
-                    "argument_count":
-                        len(argument_keys),
-
-                    "topology":
-                        self.topology_name
-                }
+                    "argument_keys": argument_keys,
+                    "argument_count": len(argument_keys),
+                    "topology": self.topology_name,
+                    "agent": requesting_agent,
+                    "tool_name": tool_name,
+                    "authorization_result": (
+                        "allowed"
+                        if request_authorized
+                        else "denied"
+                    ),
+                },
             )
         )
 
+        if not request_authorized:
+            self.log_event(
+                MASEvent.create(
+                    event_type="tool_denied",
+                    sender=requesting_agent,
+                    receiver="coordinator",
+                    tool_call=tool_name,
+                    request_id=request_id,
+                    metadata={
+                        "agent": requesting_agent,
+                        "tool_name": tool_name,
+                        "topology": self.topology_name,
+                        "authorization_result": "denied",
+                        "reason": (
+                            "Agent is not authorized for this tool "
+                            "in the active topology."
+                        ),
+                    },
+                )
+            )
+
+            raise PermissionError(
+                f"Agent '{requesting_agent}' is not authorized "
+                f"to use tool '{tool_name}' "
+                f"in topology '{self.topology_name}'."
+            )
+
+        route_sender = (
+            "coordinator"
+            if centralized_route
+            else requesting_agent
+        )
+
+        route_receiver = (
+            "tool_manager"
+            if centralized_route
+            else "tool_control_plane"
+        )
+
+        route_description = (
+            f"Coordinator forwarded '{tool_name}' request"
+            if centralized_route
+            else f"{requesting_agent} submitted '{tool_name}' request"
+        )
+
         # =====================================================
-        # COORDINATOR -> TOOL MANAGER
+        # AGENT/COORDINATOR -> TOOL CONTROL PLANE
         # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_forward",
 
-                sender="coordinator",
+                sender=route_sender,
 
-                receiver="tool_manager",
+                receiver=route_receiver,
 
-                content=(
-                    f"Coordinator forwarded "
-                    f"'{tool_name}' request"
-                ),
+                content=route_description,
 
                 tool_call=tool_name,
 
@@ -649,14 +726,14 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # TOOL MANAGER -> TOOL
+        # TOOL CONTROL PLANE -> TOOL
         # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_execution",
 
-                sender="tool_manager",
+                sender="tool_control_plane",
 
                 receiver=tool_name,
 
@@ -681,11 +758,24 @@ class MASEnvironment:
 
         try:
 
-            result = self.coordinator.handle_tool_request(
+            request = ToolRequest(
                 agent=requesting_agent,
                 tool_name=tool_name,
-                arguments=arguments
+                arguments=arguments,
+                request_id=request_id,
             )
+
+            if centralized_route:
+                result = self.coordinator.handle_tool_request(
+                    agent=requesting_agent,
+                    tool_name=tool_name,
+                    arguments=arguments
+                )
+            else:
+                result = self.tool_control_plane.submit(
+                    request,
+                    submitted_by=requesting_agent,
+                )
 
         except Exception as exc:
 
@@ -739,13 +829,25 @@ class MASEnvironment:
             else 1
         )
 
+        result_receiver = (
+            "coordinator"
+            if centralized_route
+            else requesting_agent
+        )
+
+        delivery_sender = (
+            "coordinator"
+            if centralized_route
+            else "tool_control_plane"
+        )
+
         self.log_event(
             MASEvent.create(
                 event_type="tool_result",
 
                 sender=tool_name,
 
-                receiver="coordinator",
+                receiver=result_receiver,
 
                 content=(
                     f"Tool '{tool_name}' completed "
@@ -782,7 +884,7 @@ class MASEnvironment:
             MASEvent.create(
                 event_type="tool_result_delivery",
 
-                sender="coordinator",
+                sender=delivery_sender,
 
                 receiver=requesting_agent,
 
@@ -1117,16 +1219,19 @@ class MASEnvironment:
 
         if tool_request:
 
-            result = self.request_tool(
-                requesting_agent=
-                    tool_request["agent"],
+            try:
+                result = self.request_tool(
+                    requesting_agent=
+                        tool_request["agent"],
 
-                tool_name=
-                    tool_request["tool_name"],
+                    tool_name=
+                        tool_request["tool_name"],
 
-                arguments=
-                    tool_request["arguments"]
-            )
+                    arguments=
+                        tool_request["arguments"]
+                )
+            except PermissionError:
+                result = []
 
             if isinstance(
                 result,
@@ -1363,16 +1468,19 @@ class MASEnvironment:
 
         if tool_request:
 
-            result = self.request_tool(
-                requesting_agent=
-                    tool_request["agent"],
+            try:
+                result = self.request_tool(
+                    requesting_agent=
+                        tool_request["agent"],
 
-                tool_name=
-                    tool_request["tool_name"],
+                    tool_name=
+                        tool_request["tool_name"],
 
-                arguments=
-                    tool_request["arguments"]
-            )
+                    arguments=
+                        tool_request["arguments"]
+                )
+            except PermissionError:
+                result = []
 
             if isinstance(
                 result,
@@ -1598,16 +1706,19 @@ class MASEnvironment:
 
         if tool_request:
 
-            result = self.request_tool(
-                requesting_agent=
-                    tool_request["agent"],
+            try:
+                result = self.request_tool(
+                    requesting_agent=
+                        tool_request["agent"],
 
-                tool_name=
-                    tool_request["tool_name"],
+                    tool_name=
+                        tool_request["tool_name"],
 
-                arguments=
-                    tool_request["arguments"]
-            )
+                    arguments=
+                        tool_request["arguments"]
+                )
+            except PermissionError:
+                result = []
 
             if isinstance(
                 result,
