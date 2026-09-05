@@ -349,148 +349,83 @@ class MASEnvironment:
         content: str
     ):
         """
-        Send a message according to the configured
-        communication topology.
+        Send information according to the active topology.
 
-        For:
+        For layered, centralized, and decentralized configurations,
+        communication must follow an explicitly permitted direct edge.
 
-            layered
-            centralized
-            decentralized
-
-        communication is validated directly against
-        the NetworkX topology.
-
-        For:
-
-            shared_pool
-
-        the message is published to the shared
-        communication pool instead of creating a
-        direct agent-to-agent communication path.
+        For shared_pool, the message is written to the shared
+        communication pool and is not routed through another agent.
         """
 
-        # =====================================================
-        # VALIDATE AGENTS
-        # =====================================================
-
         if sender not in self.agent_names:
-            raise ValueError(
-                f"Unknown sender: {sender}"
-            )
+            raise ValueError(f"Unknown sender: {sender}")
 
         if receiver not in self.agent_names:
-            raise ValueError(
-                f"Unknown receiver: {receiver}"
-            )
+            raise ValueError(f"Unknown receiver: {receiver}")
 
-        # =====================================================
-        # SHARED POOL COMMUNICATION
-        # =====================================================
+        # ---------------------------------------------
+        # Shared Pool
+        # ---------------------------------------------
 
         if self.topology_name == "shared_pool":
 
-            # -------------------------------------------------
-            # Store actual message in internal pool.
-            #
-            # The complete message is NOT placed in the
-            # security event log.
-            # -------------------------------------------------
+            message = {
+                "message_id": str(uuid.uuid4()),
+                "sender": sender,
+                "receiver": receiver,
+                "content": content,
+            }
 
-            self.shared_pool.append(
-                {
-                    "message_id":
-                        str(uuid.uuid4()),
-
-                    "sender":
-                        sender,
-
-                    "receiver":
-                        receiver,
-
-                    "content":
-                        content,
-                }
-            )
-
-            # -------------------------------------------------
-            # Log pool write
-            # -------------------------------------------------
+            self.shared_pool.append(message)
 
             self.log_event(
                 MASEvent.create(
                     event_type="pool_write",
-
                     sender=sender,
-
                     receiver="shared_pool",
-
-                    content=(
-                        f"{sender} published message "
-                        f"to shared pool"
-                    ),
-
+                    content=f"{sender} published message to shared pool",
                     metadata={
-                        "topology":
-                            self.topology_name,
-
-                        "target_agent":
-                            receiver,
-
+                        "topology": "shared_pool",
+                        "target_agent": receiver,
                         "content_length":
-                            self._content_length(
-                                content
-                            ),
-
+                            self._content_length(content),
                         "pool_size":
-                            len(
-                                self.shared_pool
-                            )
+                            len(self.shared_pool),
+                        "message_id":
+                            message["message_id"],
                     }
                 )
             )
 
             return content
 
-        # =====================================================
-        # DIRECT COMMUNICATION
-        # =====================================================
+        # ---------------------------------------------
+        # Agent-to-agent communication
+        # ---------------------------------------------
 
         if not self.topology.can_communicate(
             sender,
             receiver
         ):
-
             raise ValueError(
                 f"Communication not allowed: "
                 f"{sender} -> {receiver}"
             )
 
-        # =====================================================
-        # LOG DIRECT MESSAGE
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="message",
-
                 sender=sender,
-
                 receiver=receiver,
-
                 content=(
                     f"{sender} sent message "
                     f"to {receiver}"
                 ),
-
                 metadata={
-                    "topology":
-                        self.topology_name,
-
+                    "topology": self.topology_name,
                     "content_length":
-                        self._content_length(
-                            content
-                        )
+                        self._content_length(content)
                 }
             )
         )
@@ -501,23 +436,12 @@ class MASEnvironment:
     # SHARED POOL READ
     # =========================================================
 
-    def read_shared_pool(
-        self,
-        receiver: str
-    ):
-        """
-        Retrieve messages intended for an agent
-        from the shared communication pool.
-
-        Only metadata is logged.
-        Actual message contents remain in memory.
-        """
+    def read_shared_pool(self, receiver: str):
 
         if self.topology_name != "shared_pool":
-
             raise ValueError(
-                "Shared pool can only be accessed "
-                "when using shared_pool topology."
+                "Shared pool is only available "
+                "under shared_pool topology."
             )
 
         messages = [
@@ -529,23 +453,16 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="pool_read",
-
                 receiver=receiver,
-
                 content=(
-                    f"{receiver} retrieved messages "
+                    f"{receiver} retrieved "
+                    f"{len(messages)} messages "
                     f"from shared pool"
                 ),
-
                 metadata={
-                    "topology":
-                        self.topology_name,
-
-                    "message_count":
-                        len(messages),
-
-                    "pool_size":
-                        len(self.shared_pool)
+                    "topology": "shared_pool",
+                    "message_count": len(messages),
+                    "pool_size": len(self.shared_pool),
                 }
             )
         )

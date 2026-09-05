@@ -274,23 +274,11 @@ class CommunicationTopology:
     @staticmethod
     def shared_pool(agents: List[str]):
         """
-        Shared-pool communication topology.
+        Shared-pool communication configuration.
 
-        Agents do not communicate directly with
-        one another.
-
-        Instead, agents publish messages to and
-        retrieve messages from a shared communication
-        space.
-
-        Communication structure:
-
-            Coordinator ──↔
-            Researcher  ──↔
-            Analyst     ──↔  Shared Pool
-            Executor    ──↔
-
-        There are no direct agent-to-agent connections.
+        Agents do not communicate directly with one another.
+        Communication is performed through the shared pool,
+        which is infrastructure external to the agent topology.
         """
 
         topology = CommunicationTopology(
@@ -298,18 +286,9 @@ class CommunicationTopology:
             topology_name="shared_pool"
         )
 
-        pool = "shared_pool"
-
-        # Add shared communication space
-        topology.graph.add_node(pool)
-
-        # Every agent communicates with the shared pool
-        for agent in agents:
-
-            topology.add_bidirectional_connection(
-                agent,
-                pool
-            )
+        # No agent-to-agent edges are added.
+        # The shared pool is infrastructure and is therefore
+        # not represented as an agent-topology node.
 
         return topology
 
