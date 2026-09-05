@@ -22,30 +22,30 @@ from environment.memory import MemoryManager
 # =============================================================
 
 class MASState(TypedDict):
-    """
-    Shared state maintained by the LangGraph workflow.
-    """
+
+    # =====================================================
+    # WORKFLOW / ORCHESTRATION STATE
+    # =====================================================
 
     task: str
 
     plan: Optional[dict]
 
-    research: Optional[str]
-
-    # Structured source evidence collected by Researcher.
-    research_sources: Optional[list]
-
-    analysis: Optional[str]
-
-    execution: Optional[str]
-
-    # Final result produced by Coordinator.
-    final_result: Optional[str]
-
-    # Result returned by ReportWriterTool.
-    report_file: Optional[dict]
+    # Agent outputs are NOT used as unrestricted
+    # communication channels.
+    #
+    # Information that crosses agents must pass
+    # through the communication topology.
 
     error: Optional[str]
+
+    # =====================================================
+    # FINAL SYSTEM OUTPUT
+    # =====================================================
+
+    final_result: Optional[str]
+
+    report_file: Optional[dict]
 
 
 # =============================================================
@@ -480,147 +480,130 @@ class MASEnvironment:
         arguments: dict
     ):
         """
-        Route a tool request through the Coordinator.
+        Submit a tool request through the Tool Control Plane.
 
-        Full tool arguments are NOT stored in the event log.
+        Tool authorization is independent of communication topology.
 
-        Only:
+        Authorized:
+            coordinator
+            researcher
+            analyst
 
-            argument_keys
-            argument_count
-            result_count
-            result_type
-            status
-
-        are recorded.
-
-        Full arguments are still passed internally
-        to the ToolManager.
+        Unauthorized:
+            executor
         """
 
-        request_id = str(
-            uuid.uuid4()
-        )
+        request_id = str(uuid.uuid4())
 
         argument_keys = self._argument_keys(
             arguments
         )
+
+        # =====================================================
+        # AUTHORIZATION
+        # =====================================================
 
         authorized = self.tool_manager.is_allowed(
             requesting_agent,
             tool_name
         )
 
-        centralized_route = (
-            self.topology_name == "centralized"
-        )
-
-        coordinator_forwardable = (
-            centralized_route
-            and requesting_agent in {
-                "researcher",
-                "analyst",
-            }
-            and tool_name in self.tool_manager.permissions[
-                "centralized"
-            ]["coordinator"]
-        )
-
-        request_authorized = (
-            authorized
-            or coordinator_forwardable
-        )
-
-        request_receiver = (
-            "coordinator"
-            if centralized_route
-            else "tool_control_plane"
-        )
+        # =====================================================
+        # TOOL REQUEST EVENT
+        # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_request",
+
                 sender=requesting_agent,
-                receiver=request_receiver,
+
+                receiver="tool_control_plane",
+
                 content=(
                     f"{requesting_agent} requested "
                     f"tool '{tool_name}'"
                 ),
+
                 tool_call=tool_name,
+
                 request_id=request_id,
+
                 metadata={
                     "argument_keys": argument_keys,
                     "argument_count": len(argument_keys),
                     "topology": self.topology_name,
-                    "agent": requesting_agent,
+                    "requesting_agent": requesting_agent,
                     "tool_name": tool_name,
                     "authorization_result": (
                         "allowed"
-                        if request_authorized
+                        if authorized
                         else "denied"
                     ),
                 },
             )
         )
 
-        if not request_authorized:
+        # =====================================================
+        # DENIED
+        # =====================================================
+
+        if not authorized:
+
             self.log_event(
                 MASEvent.create(
                     event_type="tool_denied",
+
                     sender=requesting_agent,
-                    receiver="coordinator",
+
+                    receiver="tool_control_plane",
+
                     tool_call=tool_name,
+
                     request_id=request_id,
+
                     metadata={
-                        "agent": requesting_agent,
-                        "tool_name": tool_name,
-                        "topology": self.topology_name,
-                        "authorization_result": "denied",
-                        "reason": (
-                            "Agent is not authorized for this tool "
-                            "in the active topology."
-                        ),
+                        "requesting_agent":
+                            requesting_agent,
+
+                        "tool_name":
+                            tool_name,
+
+                        "topology":
+                            self.topology_name,
+
+                        "authorization_result":
+                            "denied",
+
+                        "reason":
+                            "Agent is not authorized "
+                            "for this tool."
                     },
                 )
             )
 
             raise PermissionError(
-                f"Agent '{requesting_agent}' is not authorized "
-                f"to use tool '{tool_name}' "
-                f"in topology '{self.topology_name}'."
+                f"Agent '{requesting_agent}' is not "
+                f"authorized to use tool "
+                f"'{tool_name}'."
             )
 
-        route_sender = (
-            "coordinator"
-            if centralized_route
-            else requesting_agent
-        )
-
-        route_receiver = (
-            "tool_manager"
-            if centralized_route
-            else "tool_control_plane"
-        )
-
-        route_description = (
-            f"Coordinator forwarded '{tool_name}' request"
-            if centralized_route
-            else f"{requesting_agent} submitted '{tool_name}' request"
-        )
-
         # =====================================================
-        # AGENT/COORDINATOR -> TOOL CONTROL PLANE
+        # TOOL CONTROL PLANE
         # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_forward",
 
-                sender=route_sender,
+                sender=requesting_agent,
 
-                receiver=route_receiver,
+                receiver="tool_control_plane",
 
-                content=route_description,
+                content=(
+                    f"{requesting_agent} submitted "
+                    f"'{tool_name}' request"
+                ),
 
                 tool_call=tool_name,
 
@@ -643,7 +626,7 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # TOOL CONTROL PLANE -> TOOL
+        # TOOL EXECUTION
         # =====================================================
 
         self.log_event(
@@ -670,7 +653,7 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # EXECUTE TOOL
+        # EXECUTE
         # =====================================================
 
         try:
@@ -682,17 +665,10 @@ class MASEnvironment:
                 request_id=request_id,
             )
 
-            if centralized_route:
-                result = self.coordinator.handle_tool_request(
-                    agent=requesting_agent,
-                    tool_name=tool_name,
-                    arguments=arguments
-                )
-            else:
-                result = self.tool_control_plane.submit(
-                    request,
-                    submitted_by=requesting_agent,
-                )
+            result = self.tool_control_plane.submit(
+                request,
+                submitted_by=requesting_agent,
+            )
 
         except Exception as exc:
 
@@ -700,9 +676,9 @@ class MASEnvironment:
                 MASEvent.create(
                     event_type="tool_error",
 
-                    sender=tool_name,
+                    sender="tool_control_plane",
 
-                    receiver="coordinator",
+                    receiver=requesting_agent,
 
                     content=(
                         f"Tool '{tool_name}' failed"
@@ -722,12 +698,6 @@ class MASEnvironment:
                         "error_message":
                             str(exc),
 
-                        "argument_keys":
-                            argument_keys,
-
-                        "argument_count":
-                            len(argument_keys),
-
                         "status":
                             "failed"
                     }
@@ -746,25 +716,13 @@ class MASEnvironment:
             else 1
         )
 
-        result_receiver = (
-            "coordinator"
-            if centralized_route
-            else requesting_agent
-        )
-
-        delivery_sender = (
-            "coordinator"
-            if centralized_route
-            else "tool_control_plane"
-        )
-
         self.log_event(
             MASEvent.create(
                 event_type="tool_result",
 
                 sender=tool_name,
 
-                receiver=result_receiver,
+                receiver=requesting_agent,
 
                 content=(
                     f"Tool '{tool_name}' completed "
@@ -794,14 +752,14 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # COORDINATOR -> AGENT
+        # RESULT DELIVERY
         # =====================================================
 
         self.log_event(
             MASEvent.create(
                 event_type="tool_result_delivery",
 
-                sender=delivery_sender,
+                sender="tool_control_plane",
 
                 receiver=requesting_agent,
 
@@ -830,7 +788,6 @@ class MASEnvironment:
         )
 
         return result
-
     # =========================================================
     # MEMORY WRITE EVENT
     # =========================================================
@@ -926,10 +883,21 @@ class MASEnvironment:
     # COORDINATOR NODE
     # =========================================================
 
+   # =========================================================
+# COORDINATOR NODE
+# =========================================================
+
     def coordinator_node(
         self,
         state: MASState
     ):
+        """
+        Coordinator receives the user task and creates the
+        execution plan.
+
+        The Coordinator does not perform research, analysis,
+        or execution itself.
+        """
 
         task = state["task"]
 
@@ -950,9 +918,7 @@ class MASEnvironment:
                         self.topology_name,
 
                     "task_length":
-                        self._content_length(
-                            task
-                        )
+                        self._content_length(task)
                 }
             )
         )
@@ -1019,15 +985,12 @@ class MASEnvironment:
             )
 
             return {
-                "plan":
-                    None,
-
-                "error":
-                    str(e)
+                "plan": None,
+                "error": str(e)
             }
 
         # =====================================================
-        # LOG PLAN WITHOUT FULL CONTENT
+        # LOG PLAN
         # =====================================================
 
         self.log_event(
@@ -1036,7 +999,9 @@ class MASEnvironment:
 
                 sender="coordinator",
 
-                content="Coordinator created task plan",
+                content=(
+                    "Coordinator created task plan"
+                ),
 
                 metadata={
                     "topology":
@@ -1056,21 +1021,43 @@ class MASEnvironment:
         )
 
         return {
-            "plan":
-                plan,
-
-            "error":
-                None
+            "plan": plan,
+            "error": None
         }
-
     # =========================================================
     # RESEARCHER NODE
     # =========================================================
+
+   # =========================================================
+# RESEARCHER NODE
+# =========================================================
 
     def research_node(
         self,
         state: MASState
     ):
+        """
+        Execute the Researcher stage.
+
+        Communication:
+
+            Coordinator -> Researcher
+
+        After research:
+
+            Layered:
+                Researcher -> Analyst
+
+            Centralized:
+                Researcher -> Coordinator
+                Coordinator -> Analyst
+
+            Decentralized:
+                Researcher -> Analyst
+
+            Shared Pool:
+                Researcher -> Pool -> Analyst
+        """
 
         plan = state["plan"]
 
@@ -1090,9 +1077,7 @@ class MASEnvironment:
 
         self.send_message(
             sender="coordinator",
-
             receiver="researcher",
-
             content=research_instruction
         )
 
@@ -1119,7 +1104,7 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # RESEARCHER DECIDES WHETHER TOOL IS REQUIRED
+        # RESEARCHER TOOL DECISION
         # =====================================================
 
         tool_request = (
@@ -1137,6 +1122,7 @@ class MASEnvironment:
         if tool_request:
 
             try:
+
                 result = self.request_tool(
                     requesting_agent=
                         tool_request["agent"],
@@ -1147,7 +1133,9 @@ class MASEnvironment:
                     arguments=
                         tool_request["arguments"]
                 )
+
             except PermissionError:
+
                 result = []
 
             if isinstance(
@@ -1166,7 +1154,7 @@ class MASEnvironment:
                 )
 
         # =====================================================
-        # RESEARCHER RUN
+        # RESEARCHER EXECUTION
         # =====================================================
 
         research_result = self.researcher.run(
@@ -1239,7 +1227,44 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # RETURN RESEARCH + ORIGINAL SOURCES
+        # PUBLISH RESEARCH RESULT
+        # =====================================================
+        #
+        # IMPORTANT:
+        #
+        # Do NOT simply assume that:
+        #
+        #     state["research"]
+        #
+        # represents communication.
+        #
+        # The result is explicitly published through the
+        # topology-controlled communication mechanism.
+        # =====================================================
+
+        self.publish_agent_result(
+            sender="researcher",
+
+            receiver="analyst",
+
+            content=research_result,
+
+            metadata={
+                "stage":
+                    "research",
+
+                "source_count":
+                    len(tool_results)
+            }
+        )
+
+        # =====================================================
+        # RETURN WORKFLOW STATE
+        # =====================================================
+        #
+        # LangGraph still requires the result to move to the
+        # next node. The actual inter-agent communication event
+        # has already been recorded through publish_agent_result.
         # =====================================================
 
         return {
@@ -1254,10 +1279,31 @@ class MASEnvironment:
     # ANALYST NODE
     # =========================================================
 
+    # =========================================================
+# ANALYST NODE
+# =========================================================
+
     def analysis_node(
         self,
         state: MASState
     ):
+        """
+        Execute the Analyst stage.
+
+        Communication:
+
+            Layered:
+                Researcher -> Analyst
+
+            Centralized:
+                Researcher -> Coordinator -> Analyst
+
+            Decentralized:
+                Researcher -> Analyst
+
+            Shared Pool:
+                Researcher -> Pool -> Analyst
+        """
 
         plan = state["plan"]
 
@@ -1285,7 +1331,60 @@ class MASEnvironment:
         ]
 
         # =====================================================
-        # PREPARE ANALYSIS MESSAGE
+        # RECEIVE RESEARCH RESULT
+        # =====================================================
+        #
+        # The communication path was established by the
+        # Researcher node.
+        #
+        # For Shared Pool we explicitly read the message here.
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            research_message = (
+                self.receive_agent_message(
+                    receiver="analyst",
+                    expected_sender="researcher"
+                )
+            )
+
+            if research_message is not None:
+
+                research = research_message
+
+        # =====================================================
+        # CENTRALIZED COMMUNICATION
+        # =====================================================
+        #
+        # Researcher -> Coordinator -> Analyst
+        #
+        # publish_agent_result() already records both hops.
+        # =====================================================
+
+        elif self.topology_name == "centralized":
+
+            # The research result has already been published
+            # as:
+            #
+            # Researcher -> Coordinator
+            # Coordinator -> Analyst
+
+            pass
+
+        # =====================================================
+        # LAYERED / DECENTRALIZED
+        # =====================================================
+        #
+        # Researcher -> Analyst
+        # =====================================================
+
+        else:
+
+            pass
+
+        # =====================================================
+        # PREPARE ANALYSIS INPUT
         # =====================================================
 
         analysis_message = (
@@ -1296,57 +1395,6 @@ class MASEnvironment:
             f"Research sources available: "
             f"{len(research_sources)}"
         )
-
-        # =====================================================
-        # LAYERED
-        #
-        # Researcher -> Analyst
-        # =====================================================
-
-        if self.topology_name == "layered":
-
-            self.send_message(
-                sender="researcher",
-
-                receiver="analyst",
-
-                content=analysis_message
-            )
-
-        # =====================================================
-        # SHARED POOL
-        #
-        # Coordinator publishes to pool.
-        # Analyst reads from pool.
-        # =====================================================
-
-        elif self.topology_name == "shared_pool":
-
-            self.send_message(
-                sender="coordinator",
-
-                receiver="analyst",
-
-                content=analysis_message
-            )
-
-            self.read_shared_pool(
-                receiver="analyst"
-            )
-
-        # =====================================================
-        # CENTRALIZED / DECENTRALIZED
-        # =====================================================
-
-        else:
-
-            self.send_message(
-                sender="coordinator",
-
-                receiver="analyst",
-
-                content=analysis_message
-            )
 
         # =====================================================
         # ANALYST MEMORY
@@ -1361,7 +1409,7 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # ANALYST DECIDES WHETHER ADDITIONAL TOOL IS REQUIRED
+        # ANALYST TOOL DECISION
         # =====================================================
 
         tool_request = (
@@ -1386,6 +1434,7 @@ class MASEnvironment:
         if tool_request:
 
             try:
+
                 result = self.request_tool(
                     requesting_agent=
                         tool_request["agent"],
@@ -1396,7 +1445,9 @@ class MASEnvironment:
                     arguments=
                         tool_request["arguments"]
                 )
+
             except PermissionError:
+
                 result = []
 
             if isinstance(
@@ -1500,11 +1551,46 @@ class MASEnvironment:
             }
         )
 
+        # =====================================================
+        # PUBLISH ANALYSIS RESULT
+        # =====================================================
+        #
+        # Layered:
+        #     Analyst -> Executor
+        #
+        # Centralized:
+        #     Analyst -> Coordinator -> Executor
+        #
+        # Decentralized:
+        #     Analyst -> Executor
+        #
+        # Shared Pool:
+        #     Analyst -> Pool -> Executor
+        # =====================================================
+
+        self.publish_agent_result(
+            sender="analyst",
+
+            receiver="executor",
+
+            content=analysis_result,
+
+            metadata={
+                "stage":
+                    "analysis",
+
+                "research_source_count":
+                    len(research_sources),
+
+                "additional_source_count":
+                    len(tool_results)
+            }
+        )
+
         return {
             "analysis":
                 analysis_result
         }
-
     # =========================================================
     # EXECUTOR NODE
     # =========================================================
@@ -2083,6 +2169,101 @@ class MASEnvironment:
         # =====================================================
 
         return workflow.compile()
+
+    def publish_agent_result(
+        self,
+        sender: str,
+        receiver: str,
+        content: str,
+        metadata=None
+    ):
+        """
+        Deliver agent-produced information through
+        the active communication mechanism.
+
+        This function ensures that information crossing
+        agent boundaries is represented as communication.
+        """
+
+        if self.topology_name == "shared_pool":
+
+            message = {
+                "message_id": str(uuid.uuid4()),
+                "sender": sender,
+                "receiver": receiver,
+                "content": content,
+                "metadata": metadata or {},
+            }
+
+            self.shared_pool.append(message)
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="pool_write",
+                    sender=sender,
+                    receiver="shared_pool",
+                    content=(
+                        f"{sender} published result "
+                        f"for {receiver}"
+                    ),
+                    metadata={
+                        "topology": "shared_pool",
+                        "target_agent": receiver,
+                        "message_id":
+                            message["message_id"],
+                        "content_length":
+                            self._content_length(content),
+                        **(metadata or {})
+                    }
+                )
+            )
+
+            return message
+
+        # -----------------------------------------------------
+        # Direct topology
+        # -----------------------------------------------------
+
+        if not self.topology.can_communicate(
+            sender,
+            receiver
+        ):
+            raise ValueError(
+                f"Communication not allowed: "
+                f"{sender} -> {receiver}"
+            )
+
+        self.log_event(
+            MASEvent.create(
+                event_type="message",
+
+                sender=sender,
+
+                receiver=receiver,
+
+                content=(
+                    f"{sender} delivered result "
+                    f"to {receiver}"
+                ),
+
+                metadata={
+                    "topology":
+                        self.topology_name,
+
+                    "content_length":
+                        self._content_length(content),
+
+                    **(metadata or {})
+                }
+            )
+        )
+
+        return {
+            "sender": sender,
+            "receiver": receiver,
+            "content": content,
+            "metadata": metadata or {}
+        }
 
     # =========================================================
     # EXECUTE TASK

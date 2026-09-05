@@ -30,79 +30,54 @@ class ToolManager:
         }
 
         # =====================================================
-        # AGENT TOOL PERMISSIONS
+        # FIXED AGENT TOOL AUTHORIZATION
+        # =====================================================
+        #
+        # IMPORTANT:
+        # Tool authorization is independent of
+        # communication topology.
+        #
+        # Coordinator -> authorized
+        # Researcher  -> authorized
+        # Analyst     -> authorized
+        # Executor    -> NOT authorized
+        #
+        # This policy is identical for every topology.
         # =====================================================
 
         self.permissions = {
-            "centralized": {
-                "coordinator": [
-                    "internet_search",
-                    "academic_search",
-                    "report_writer",
-                ],
-                "researcher": [],
-                "analyst": [],
-                "executor": [],
-            },
-            "decentralized": {
-                "coordinator": [
-                    "internet_search",
-                    "academic_search",
-                    "report_writer",
-                ],
-                "researcher": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "analyst": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "executor": [],
-            },
-            "layered": {
-                "coordinator": [
-                    "internet_search",
-                    "academic_search",
-                    "report_writer",
-                ],
-                "researcher": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "analyst": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "executor": [],
-            },
-            "shared_pool": {
-                "coordinator": [
-                    "internet_search",
-                    "academic_search",
-                    "report_writer",
-                ],
-                "researcher": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "analyst": [
-                    "internet_search",
-                    "academic_search",
-                ],
-                "executor": [],
-            },
+
+            "coordinator": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "report_writer",
+            ],
+
+            "researcher": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+            ],
+
+            "analyst": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+            ],
+
+            "executor": [],
         }
 
         self.current_topology = None
 
-    def set_topology(self, topology_name: str):
-        if topology_name not in self.permissions:
-            raise ValueError(
-                f"Unsupported topology: {topology_name}"
-            )
+    # =========================================================
+    # TOPOLOGY
+    # =========================================================
 
-        self.current_topology = topology_name
+    def set_topology(self, topology_name: str):
+
+        self.current_topology = topology_name.lower()
 
     # =========================================================
     # PERMISSION CHECK
@@ -114,12 +89,7 @@ class ToolManager:
         tool_name: str
     ) -> bool:
 
-        topology_permissions = self.permissions.get(
-            self.current_topology,
-            {}
-        )
-
-        allowed_tools = topology_permissions.get(
+        allowed_tools = self.permissions.get(
             agent,
             []
         )
@@ -142,7 +112,6 @@ class ToolManager:
         # -----------------------------------------------------
 
         if not agent or not str(agent).strip():
-
             raise ValueError(
                 "Tool request must specify an agent."
             )
@@ -153,31 +122,24 @@ class ToolManager:
         # Validate tool name
         # -----------------------------------------------------
 
-        if (
-            not tool_name
-            or not str(tool_name).strip()
-        ):
-
+        if not tool_name or not str(tool_name).strip():
             raise ValueError(
                 "Tool request must specify a tool name."
             )
 
-        tool_name = str(
-            tool_name
-        ).strip()
+        tool_name = str(tool_name).strip()
 
         # -----------------------------------------------------
-        # Check whether tool exists
+        # Check tool
         # -----------------------------------------------------
 
         if tool_name not in self.tools:
-
             raise ValueError(
                 f"Unknown tool: {tool_name}"
             )
 
         # -----------------------------------------------------
-        # Permission check
+        # Authorization
         # -----------------------------------------------------
 
         if not self.is_allowed(
@@ -187,8 +149,7 @@ class ToolManager:
 
             raise PermissionError(
                 f"Agent '{agent}' is not authorized "
-                f"to use tool '{tool_name}' "
-                f"in topology '{self.current_topology}'."
+                f"to use tool '{tool_name}'."
             )
 
         # -----------------------------------------------------
@@ -196,14 +157,9 @@ class ToolManager:
         # -----------------------------------------------------
 
         if arguments is None:
-
             arguments = {}
 
-        if not isinstance(
-            arguments,
-            dict
-        ):
-
+        if not isinstance(arguments, dict):
             raise ValueError(
                 "Tool arguments must be a dictionary."
             )
@@ -215,14 +171,9 @@ class ToolManager:
         if tool_name == "internet_search":
 
             return self._execute_search(
-                search_tool=
-                    self.tools["internet_search"],
-
-                arguments=
-                    arguments,
-
-                search_type=
-                    "internet"
+                search_tool=self.tools["internet_search"],
+                arguments=arguments,
+                search_type="internet"
             )
 
         # =====================================================
@@ -232,14 +183,9 @@ class ToolManager:
         if tool_name == "academic_search":
 
             return self._execute_search(
-                search_tool=
-                    self.tools["academic_search"],
-
-                arguments=
-                    arguments,
-
-                search_type=
-                    "academic"
+                search_tool=self.tools["academic_search"],
+                arguments=arguments,
+                search_type="academic"
             )
 
         # =====================================================
@@ -248,12 +194,9 @@ class ToolManager:
 
         if tool_name == "source_collector":
 
-            url = arguments.get(
-                "url"
-            )
+            url = arguments.get("url")
 
             if not url:
-
                 raise ValueError(
                     "source_collector requires a URL."
                 )
@@ -270,17 +213,9 @@ class ToolManager:
 
         if tool_name == "report_writer":
 
-            title = arguments.get(
-                "title"
-            )
-
-            content = arguments.get(
-                "content"
-            )
-
-            filename = arguments.get(
-                "filename"
-            )
+            title = arguments.get("title")
+            content = arguments.get("content")
+            filename = arguments.get("filename")
 
             return self.tools[
                 "report_writer"
@@ -290,13 +225,8 @@ class ToolManager:
                 filename=filename
             )
 
-        # =====================================================
-        # SAFETY FALLBACK
-        # =====================================================
-
         raise ValueError(
-            f"No execution handler for tool "
-            f"'{tool_name}'."
+            f"No execution handler for tool '{tool_name}'."
         )
 
     # =========================================================
@@ -310,26 +240,14 @@ class ToolManager:
         search_type: str
     ):
 
-        query = arguments.get(
-            "query"
-        )
+        query = arguments.get("query")
 
-        if (
-            not query
-            or not str(query).strip()
-        ):
-
+        if not query or not str(query).strip():
             raise ValueError(
                 "Search query cannot be empty."
             )
 
-        query = str(
-            query
-        ).strip()
-
-        # -----------------------------------------------------
-        # max_results
-        # -----------------------------------------------------
+        query = str(query).strip()
 
         max_results = arguments.get(
             "max_results",
@@ -337,29 +255,14 @@ class ToolManager:
         )
 
         try:
-
-            max_results = int(
-                max_results
-            )
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
+            max_results = int(max_results)
+        except (TypeError, ValueError):
             max_results = 5
 
         max_results = max(
             1,
-            min(
-                max_results,
-                10
-            )
+            min(max_results, 10)
         )
-
-        # -----------------------------------------------------
-        # Execute search
-        # -----------------------------------------------------
 
         search_results = search_tool.search(
             query=query,
@@ -367,69 +270,38 @@ class ToolManager:
         )
 
         if not search_results:
-
             return []
-
-        # -----------------------------------------------------
-        # Collect source content
-        # -----------------------------------------------------
 
         collected_results = []
 
         for source in search_results:
 
-            if not isinstance(
-                source,
-                dict
-            ):
-
+            if not isinstance(source, dict):
                 continue
 
-            enriched_source = dict(
-                source
-            )
+            enriched_source = dict(source)
 
-            source_url = source.get(
-                "source_url"
-            )
-
-            # -------------------------------------------------
-            # No URL
-            # -------------------------------------------------
+            source_url = source.get("source_url")
 
             if not source_url:
 
-                enriched_source[
-                    "content_status"
-                ] = "no_source_url"
+                enriched_source["content_status"] = \
+                    "no_source_url"
 
-                enriched_source[
-                    "content"
-                ] = None
+                enriched_source["content"] = None
+                enriched_source["content_type"] = None
+                enriched_source["content_length"] = 0
 
-                enriched_source[
-                    "content_type"
-                ] = None
-
-                enriched_source[
-                    "content_length"
-                ] = 0
-
-                enriched_source[
-                    "content_error"
-                ] = (
+                enriched_source["content_error"] = \
                     "No source URL was provided."
-                )
+
+                enriched_source["search_type"] = search_type
 
                 collected_results.append(
                     enriched_source
                 )
 
                 continue
-
-            # -------------------------------------------------
-            # Collect source
-            # -------------------------------------------------
 
             try:
 
@@ -439,75 +311,41 @@ class ToolManager:
                     url=source_url
                 )
 
-                enriched_source[
-                    "content"
-                ] = collected.get(
-                    "content"
-                )
+                enriched_source["content"] = \
+                    collected.get("content")
 
-                enriched_source[
-                    "content_type"
-                ] = collected.get(
-                    "content_type"
-                )
+                enriched_source["content_type"] = \
+                    collected.get("content_type")
 
-                enriched_source[
-                    "content_status"
-                ] = collected.get(
-                    "content_status"
-                )
+                enriched_source["content_status"] = \
+                    collected.get("content_status")
 
-                enriched_source[
-                    "content_length"
-                ] = collected.get(
-                    "content_length",
-                    0
-                )
+                enriched_source["content_length"] = \
+                    collected.get("content_length", 0)
 
-                enriched_source[
-                    "content_error"
-                ] = collected.get(
-                    "content_error"
-                )
+                enriched_source["content_error"] = \
+                    collected.get("content_error")
 
-                enriched_source[
-                    "collected_url"
-                ] = collected.get(
-                    "url",
-                    source_url
-                )
+                enriched_source["collected_url"] = \
+                    collected.get(
+                        "url",
+                        source_url
+                    )
 
             except Exception as exc:
 
-                enriched_source[
-                    "content"
-                ] = None
+                enriched_source["content"] = None
+                enriched_source["content_type"] = None
 
-                enriched_source[
-                    "content_type"
-                ] = None
-
-                enriched_source[
-                    "content_status"
-                ] = (
+                enriched_source["content_status"] = \
                     "collection_failed"
-                )
 
-                enriched_source[
-                    "content_length"
-                ] = 0
+                enriched_source["content_length"] = 0
 
-                enriched_source[
-                    "content_error"
-                ] = str(exc)
+                enriched_source["content_error"] = \
+                    str(exc)
 
-            # -------------------------------------------------
-            # Search type
-            # -------------------------------------------------
-
-            enriched_source[
-                "search_type"
-            ] = search_type
+            enriched_source["search_type"] = search_type
 
             collected_results.append(
                 enriched_source
