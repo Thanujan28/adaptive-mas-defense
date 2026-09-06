@@ -1,6 +1,110 @@
 import json
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def calendar_request_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Build a calendar tool request from explicit scheduling language."""
+    normalized = str(text or "").strip()
+    normalized = normalized.replace("‘", '"').replace("’", '"')
+    lowered = normalized.lower()
+    if not any(word in lowered for word in ("calendar", "schedule", "meeting", "appointment")):
+        return None
+
+    event_match = re.search(r"\bevent[- ]?(\d+)\b", lowered)
+    if event_match and any(word in lowered for word in ("delete", "remove", "cancel")):
+        return {
+            "tool_name": "mock_calendar",
+            "arguments": {
+                "operation": "delete",
+                "event_id": f"event-{int(event_match.group(1)):04d}",
+            },
+        }
+
+    if any(phrase in lowered for phrase in ("list events", "show events", "view events", "calendar events")):
+        return {
+            "tool_name": "mock_calendar",
+            "arguments": {"operation": "list"},
+        }
+
+    operation = "get" if event_match and any(
+        word in lowered for word in ("get", "retrieve", "view")
+    ) else "create"
+    if operation == "get":
+        return {
+            "tool_name": "mock_calendar",
+            "arguments": {
+                "operation": "get",
+                "event_id": f"event-{int(event_match.group(1)):04d}",
+            },
+        }
+
+    start_match = re.search(
+        r"\b(20\d{2}-\d{2}-\d{2}(?:[tT ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:Z)?)?)\b",
+        normalized,
+    )
+    if not start_match:
+        relative_match = re.search(
+            r"\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+            r"(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?)?",
+            normalized,
+            re.IGNORECASE,
+        )
+        if relative_match:
+            weekdays = {
+                "monday": 0, "tuesday": 1, "wednesday": 2,
+                "thursday": 3, "friday": 4, "saturday": 5,
+                "sunday": 6,
+            }
+            now = datetime.now()
+            days_ahead = (
+                weekdays[relative_match.group(1).lower()]
+                - now.weekday()
+            ) % 7 or 7
+            event_date = now.date() + timedelta(days=days_ahead)
+            hour = int(relative_match.group(2) or 9)
+            minute = int(relative_match.group(3) or 0)
+            meridiem = (relative_match.group(4) or "").upper()
+            if meridiem == "PM" and hour != 12:
+                hour += 12
+            if meridiem == "AM" and hour == 12:
+                hour = 0
+            start_value = datetime.combine(
+                event_date,
+                datetime.min.time().replace(hour=hour, minute=minute),
+            ).isoformat()
+            start_match = None
+        else:
+            start_value = None
+    else:
+        start_value = start_match.group(1)
+    if not start_match and not start_value:
+        return None
+
+    title_match = re.search(
+        r"\b(?:titled|called|named|title)\b\s*[:=]?\s*[\"']?(.+?)(?:\s+on\s+(?:20\d{2}-\d{2}-\d{2}|next\b)|\s+with\s+the\s+selected|[\"';\n]|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    title = title_match.group(1).strip() if title_match else "Scheduled event"
+    title = re.sub(r"\s+(?:on|at)\s*$", "", title, flags=re.IGNORECASE).strip()
+    participants = re.findall(
+        r"\b(?:Coordinator|Researcher-[12]|Analyst-[12])\b",
+        normalized,
+    )
+    duration_match = re.search(r"(\d+)\s*[- ]?minute", lowered)
+    return {
+        "tool_name": "mock_calendar",
+        "arguments": {
+            "operation": "create",
+            "title": title,
+            "start": start_value,
+            **({"duration_minutes": int(duration_match.group(1))} if duration_match else {}),
+            **({"participants": participants} if participants else {}),
+        },
+    }
 
 
 class MockCalendarTool:
@@ -19,6 +123,8 @@ class MockCalendarTool:
         end: Optional[str] = None,
         description: str = "",
         location: str = "",
+        duration_minutes: Optional[int] = None,
+        participants: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if not title or not str(title).strip():
             raise ValueError("Calendar event title cannot be empty.")
@@ -34,6 +140,8 @@ class MockCalendarTool:
             "end": str(end).strip() if end else "",
             "description": str(description).strip(),
             "location": str(location).strip(),
+            "duration_minutes": duration_minutes,
+            "participants": list(participants or []),
         }
         self._events[event_id] = event
         self._save()
@@ -66,7 +174,11 @@ class MockCalendarTool:
 
         try:
             with self.database_path.open("r", encoding="utf-8") as database:
-                data = json.load(database)
+                raw_data = database.read().strip()
+            if not raw_data:
+                self._save()
+                return
+            data = json.loads(raw_data)
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(
                 f"Calendar database could not be read: {self.database_path}"

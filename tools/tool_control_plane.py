@@ -26,7 +26,12 @@ class ToolControlPlane:
 
         if (
             submitted_by.startswith("executor")
-            and request.tool_name != "mock_email"
+            and request.tool_name not in (
+                "mock_email",
+                "mock_mail",
+                "mock_calendar",
+                "mock_calender",
+            )
         ):
             raise PermissionError(
                 "Executors are only authorized to submit mock email requests."

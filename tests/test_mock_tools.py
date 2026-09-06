@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 
 from environment.mas_environment import MASEnvironment
-from tools.mock_email import MockEmailTool
+from tools.mock_email import MockEmailTool, mail_request_from_text
 from tools.mock_calendar import MockCalendarTool
+from tools.mock_calendar import calendar_request_from_text
 from tools.tool_manager import ToolManager
 
 
@@ -46,6 +47,47 @@ class _FakeMailHog:
 
 class MockToolTests(unittest.TestCase):
 
+    def test_calendar_intent_becomes_structured_tool_request(self):
+        request = calendar_request_from_text(
+            "Schedule a calendar event titled Research review on 2026-09-07T09:00:00Z."
+        )
+        self.assertEqual(
+            request,
+            {
+                "tool_name": "mock_calendar",
+                "arguments": {
+                    "operation": "create",
+                    "title": "Research review",
+                    "start": "2026-09-07T09:00:00Z",
+                },
+            },
+        )
+
+    def test_executor_meeting_instruction_becomes_calendar_request(self):
+        from agents.executor import ExecutorAgent, _calendar_description_from_analysis
+
+        request = ExecutorAgent(name="executor-1").create_tool_request(
+            "Schedule a 60-minute research meeting for next Wednesday at 10:00 AM, "
+            "create a calendar event titled ‘AI Agent Security Research Meeting’ "
+            "and invite the Coordinator, Researcher-1, Researcher-2, Analyst-1, "
+            "and Analyst-2 as participants",
+            "selected topic",
+        )
+        self.assertEqual(request["tool_name"], "mock_calendar")
+        self.assertEqual(request["arguments"]["duration_minutes"], 60)
+        self.assertEqual(request["arguments"]["start"], "2026-09-09T10:00:00")
+        self.assertIn("Coordinator", request["arguments"]["participants"])
+        self.assertEqual(
+            _calendar_description_from_analysis(
+                "Selected topic: Agent memory poisoning in multi-agent systems.\n"
+                "Additional analysis: this is a long report."
+            ),
+            "Agent memory poisoning in multi-agent systems.",
+        )
+        self.assertLess(
+            len(_calendar_description_from_analysis("A long report without a label.")),
+            100,
+        )
     def test_calendar_operations_are_deterministic(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database_path = Path(temporary_directory) / "calendar.json"
@@ -66,6 +108,24 @@ class MockToolTests(unittest.TestCase):
                 reloaded_calendar.delete_event("event-0001"),
                 {"status": "deleted", "id": "event-0001"},
             )
+
+    def test_mail_intent_becomes_structured_tool_request(self):
+        request = mail_request_from_text(
+            "Send an email to recipient@example.test "
+            "subject: Status body: Complete"
+        )
+        self.assertEqual(
+            request,
+            {
+                "tool_name": "mock_mail",
+                "arguments": {
+                    "operation": "send",
+                    "to": "recipient@example.test",
+                    "subject": "Status",
+                    "body": "Complete",
+                },
+            },
+        )
 
     def test_email_uses_mailhog_api(self):
         fake_mailhog = _FakeMailHog()
@@ -88,6 +148,28 @@ class MockToolTests(unittest.TestCase):
             "Status",
         )
 
+    def test_agent_can_request_both_mock_tool_names(self):
+        manager = ToolManager()
+        self.assertTrue(manager.is_allowed("researcher-1", "mock_calendar"))
+        self.assertTrue(manager.is_allowed("researcher-1", "mock_mail"))
+        self.assertIs(manager.tools["mock_mail"], manager.tools["mock_email"])
+        self.assertIs(
+            manager.tools["mock_calender"],
+            manager.tools["mock_calendar"],
+        )
+        self.assertTrue(manager.is_allowed("researcher-1", "mock_calender"))
+
+        environment = MASEnvironment(topology_name="layered")
+        environment.request_tool(
+            requesting_agent="researcher-1",
+            tool_name="mock_calendar",
+            arguments={"operation": "list"},
+        )
+        self.assertEqual(
+            environment.get_events()[0]["metadata"]["authorization_result"],
+            "allowed",
+        )
+
     def test_permissions_are_independent_of_topology(self):
         manager = ToolManager()
         for topology_name in (
@@ -100,7 +182,7 @@ class MockToolTests(unittest.TestCase):
             self.assertTrue(manager.is_allowed("researcher-1", "mock_calendar"))
             self.assertTrue(manager.is_allowed("analyst-1", "mock_email"))
             self.assertTrue(manager.is_allowed("executor-1", "mock_email"))
-            self.assertFalse(manager.is_allowed("executor-1", "mock_calendar"))
+            self.assertTrue(manager.is_allowed("executor-1", "mock_calendar"))
             self.assertFalse(manager.is_allowed("executor-1", "internet_search"))
 
     def test_tool_events_preserve_route_identity_and_topology(self):

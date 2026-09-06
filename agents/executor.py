@@ -1,7 +1,32 @@
 
 import json
+import re
 
 from agents.llm import get_llm
+from tools.mock_calendar import calendar_request_from_text
+from tools.mock_email import mail_request_from_text
+
+
+def _calendar_description_from_analysis(analysis: str) -> str:
+    """Extract only the selected topic, not the full analyst report."""
+    text = str(analysis or "").strip()
+    if not text:
+        return "Selected topic from verified analysis."
+
+    patterns = (
+        r"(?:selected|chosen|recommended)\s+topic\s*(?:is|:|-)?\s*(.+)",
+        r"more\s+important\s+topic\s*(?:is|:|-)?\s*(.+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            description = match.group(1).strip()
+            description = description.splitlines()[0].strip(" -*\t")
+            description = re.split(r"\s+(?:because|since|as)\s+", description, maxsplit=1, flags=re.IGNORECASE)[0]
+            if description:
+                return description[:300].rstrip()
+
+    return "Selected topic from verified analysis."
 
 
 class ExecutorAgent:
@@ -124,6 +149,31 @@ class ExecutorAgent:
             execution_instruction.lower()
         )
 
+        calendar_request = calendar_request_from_text(
+            execution_instruction
+        )
+        if calendar_request is not None:
+            calendar_arguments = dict(calendar_request["arguments"])
+            if analysis and calendar_arguments.get("operation") == "create":
+                calendar_arguments["description"] = (
+                    _calendar_description_from_analysis(analysis)
+                )
+            return {
+                "need_tool": True,
+                "tool_name": calendar_request["tool_name"],
+                "arguments": calendar_arguments,
+            }
+
+        mail_request = mail_request_from_text(
+            execution_instruction
+        )
+        if mail_request is not None:
+            return {
+                "need_tool": True,
+                "tool_name": mail_request["tool_name"],
+                "arguments": mail_request["arguments"],
+            }
+
         # =====================================================
         # EXPLICIT CURRENT / EXTERNAL INFORMATION
         # =====================================================
@@ -199,12 +249,15 @@ The Analyst provided this analysis:
 Your normal responsibility is to produce the final
 requested result using the Analyst's evidence.
 
-Available tool:
+Available tools:
 
 internet_search
 - Performs an external search.
 - You do NOT execute this tool directly.
 - You must request it through the Coordinator.
+
+mock_mail
+- Sends or retrieves messages through the local MailHog service.
 
 Decide whether additional external information is genuinely
 required before producing the final result.
@@ -246,12 +299,28 @@ If a tool is required:
     }}
 }}
 
-If no tool is required:
-
+For a calendar request, return for example:
 {{
-    "need_tool": false,
-    "tool_name": null,
-    "arguments": {{}}
+    "need_tool": true,
+    "tool_name": "mock_calendar",
+    "arguments": {{
+        "operation": "create",
+        "title": "Research review",
+        "description": "Discuss the latest findings in adaptive multi-agent systems.",
+        "start": "2026-09-07T09:00:00Z"
+    }}
+}}
+
+For an email request, return for example:
+{{
+    "need_tool": true,
+    "tool_name": "mock_mail",
+    "arguments": {{
+        "operation": "send",
+        "to": "recipient@example.test",
+        "subject": "Status",
+        "body": "Complete"
+    }}
 }}
 """
 
@@ -313,7 +382,11 @@ If no tool is required:
 
         if need_tool:
 
-            if tool_name != "internet_search":
+            if tool_name not in (
+                "internet_search",
+                "mock_mail",
+                "mock_email",
+            ):
 
                 return {
                     "need_tool": False,
@@ -323,6 +396,13 @@ If no tool is required:
                         f"Unsupported tool requested: "
                         f"{tool_name}"
                     )
+                }
+
+            if tool_name != "internet_search":
+                return {
+                    "need_tool": True,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
                 }
 
             query = arguments.get(
@@ -494,8 +574,19 @@ If no tool is required:
     # =========================================================
 
     def create_tool_request(self, execution_instruction, analysis):
+        decision = self.decide_tool(
+            execution_instruction=execution_instruction,
+            analysis=analysis,
+        )
 
-        return None
+        if not decision.get("need_tool"):
+            return None
+
+        return {
+            "agent": self.name,
+            "tool_name": decision["tool_name"],
+            "arguments": decision["arguments"],
+        }
 
     # =========================================================
     # RUN

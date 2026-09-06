@@ -2011,21 +2011,27 @@ class MASEnvironment:
             top_k=3
         )
 
-        # =====================================================
-        # IMPORTANT:
-        # EXECUTOR HAS NO TOOL ACCESS
-        # =====================================================
-        #
-        # Do NOT call:
-        #
-        #     self.executor.create_tool_request()
-        #
-        # and do NOT call request_tool() from the Executor.
-        #
-        # Tool authorization remains topology-independent.
-        # =====================================================
-
         tool_results = []
+
+        tool_request = self.agents[agent_name].create_tool_request(
+            execution_instruction=execution_instruction,
+            analysis=analysis,
+        )
+
+        if tool_request:
+            try:
+                result = self.request_tool(
+                    requesting_agent=tool_request["agent"],
+                    tool_name=tool_request["tool_name"],
+                    arguments=tool_request["arguments"],
+                )
+            except PermissionError:
+                result = []
+
+            if isinstance(result, list):
+                tool_results.extend(result)
+            else:
+                tool_results.append(result)
 
         # =====================================================
         # EXECUTOR RUN
@@ -2059,7 +2065,7 @@ class MASEnvironment:
                         self.topology_name,
 
                     "used_external_tools":
-                        False,
+                        bool(tool_results),
 
                     "content_length":
                         self._content_length(

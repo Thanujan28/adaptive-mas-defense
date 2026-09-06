@@ -1,7 +1,47 @@
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
+
+
+def mail_request_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Build a structured MailHog request from explicit email language."""
+    normalized = str(text or "").strip()
+    lowered = normalized.lower()
+    if not any(word in lowered for word in ("email", "e-mail", "mail")):
+        return None
+
+    recipient_match = re.search(
+        r"\bto\s+([\w.+-]+@[\w.-]+\.[A-Za-z]{2,})",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not recipient_match:
+        return None
+
+    subject_match = re.search(
+        r"\bsubject\s*[:=]?\s*[\"']?(.+?)(?:[\"']|\s+body\s*[:=]|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    body_match = re.search(
+        r"\bbody\s*[:=]?\s*[\"']?(.+?)[\"']?$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not subject_match or not body_match:
+        return None
+
+    return {
+        "tool_name": "mock_mail",
+        "arguments": {
+            "operation": "send",
+            "to": recipient_match.group(1),
+            "subject": subject_match.group(1).strip(),
+            "body": body_match.group(1).strip(),
+        },
+    }
 
 
 class MockEmailTool:

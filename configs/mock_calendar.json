@@ -1,37 +1,21 @@
 {
   "events": [
     {
-      "description": "",
+      "description": "Selected topic from verified analysis.",
+      "duration_minutes": 60,
       "end": "",
       "id": "event-0001",
       "location": "",
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "end": "",
-      "id": "event-0002",
-      "location": "",
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "end": "",
-      "id": "event-0003",
-      "location": "",
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "end": "",
-      "id": "event-0004",
-      "location": "",
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
+      "participants": [
+        "Coordinator",
+        "Researcher-1",
+        "Researcher-2",
+        "Analyst-1",
+        "Analyst-2"
+      ],
+      "start": "2026-09-09T10:00:00",
+      "title": "AI Agent Security Research Meeting"
     }
   ],
-  "next_id": 5
+  "next_id": 2
 }

@@ -37,6 +37,10 @@ class ToolManager:
                 MockEmailTool(),
         }
 
+        # Keep both names available to agent prompts and older callers.
+        self.tools["mock_mail"] = self.tools["mock_email"]
+        self.tools["mock_calender"] = self.tools["mock_calendar"]
+
         # =====================================================
         # FIXED AGENT TOOL AUTHORIZATION
         # =====================================================
@@ -61,6 +65,8 @@ class ToolManager:
                 "report_writer",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
             "planner": [
@@ -69,6 +75,8 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
             "researcher-1": [
@@ -77,6 +85,8 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
             "researcher-2": [
@@ -85,6 +95,8 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
             "analyst-1": [
@@ -93,6 +105,8 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
             "analyst-2": [
@@ -101,10 +115,12 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
 
-            "executor-1": ["mock_email"],
-            "executor-2": ["mock_email"],
+            "executor-1": ["mock_email", "mock_mail", "mock_calendar", "mock_calender"],
+            "executor-2": ["mock_email", "mock_mail"],
 
             # Compatibility aliases for the former four-agent API.
             "researcher": [
@@ -113,6 +129,8 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
             "analyst": [
                 "internet_search",
@@ -120,8 +138,10 @@ class ToolManager:
                 "source_collector",
                 "mock_calendar",
                 "mock_email",
+                "mock_mail",
+                "mock_calender",
             ],
-            "executor": ["mock_email"],
+            "executor": ["mock_email", "mock_mail"],
         }
 
         self.current_topology = None
@@ -280,13 +300,16 @@ class ToolManager:
                 filename=filename
             )
 
-        if tool_name == "mock_calendar":
+        if tool_name in ("mock_calendar", "mock_calender"):
             operation = arguments.get("operation", "list")
             calendar = self.tools["mock_calendar"]
             if operation == "create":
                 return calendar.create_event(**{
                     key: arguments[key]
-                    for key in ("title", "start", "end", "description", "location")
+                    for key in (
+                        "title", "start", "end", "description", "location",
+                        "duration_minutes", "participants",
+                    )
                     if key in arguments
                 })
             if operation == "list":
@@ -297,7 +320,7 @@ class ToolManager:
                 return calendar.delete_event(arguments.get("event_id"))
             raise ValueError(f"Unknown mock_calendar operation: {operation}")
 
-        if tool_name == "mock_email":
+        if tool_name in ("mock_email", "mock_mail"):
             operation = arguments.get("operation", "send")
             email = self.tools["mock_email"]
             if operation == "send":

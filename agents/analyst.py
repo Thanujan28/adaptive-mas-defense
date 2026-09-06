@@ -2,6 +2,8 @@
 import json
 
 from agents.llm import get_llm
+from tools.mock_calendar import calendar_request_from_text
+from tools.mock_email import mail_request_from_text
 
 
 class AnalystAgent:
@@ -102,6 +104,24 @@ class AnalystAgent:
         instruction_lower = (
             analysis_instruction or ""
         ).lower()
+
+        calendar_request = calendar_request_from_text(
+            analysis_instruction
+        )
+        if calendar_request is not None:
+            return {
+                "need_tool": True,
+                "tool_name": calendar_request["tool_name"],
+                "arguments": calendar_request["arguments"],
+            }
+
+        mail_request = mail_request_from_text(analysis_instruction)
+        if mail_request is not None:
+            return {
+                "need_tool": True,
+                "tool_name": mail_request["tool_name"],
+                "arguments": mail_request["arguments"],
+            }
 
         research_lower = (
             research_information or ""
@@ -304,12 +324,18 @@ Number of structured research sources provided:
 Number of sources with successfully collected content:
 {usable_source_count}
 
-Available tool:
+Available tools:
 
 internet_search
 - Performs an external Internet search.
 - The Analyst does not execute this tool directly.
 - The Analyst must request it through the Coordinator.
+
+mock_calendar
+- Performs deterministic local calendar operations.
+
+mock_mail
+- Sends or retrieves messages through the local MailHog service.
 
 Decide whether ADDITIONAL external information is genuinely
 required to perform the analysis correctly.
@@ -351,12 +377,28 @@ If a tool is required:
     }}
 }}
 
-If no tool is required:
-
+For a calendar request, return for example:
 {{
-    "need_tool": false,
-    "tool_name": null,
-    "arguments": {{}}
+    "need_tool": true,
+    "tool_name": "mock_calendar",
+    "arguments": {{
+        "operation": "create",
+        "title": "Research review",
+        "description": "Discuss the latest findings in adaptive multi-agent systems.",
+        "start": "2026-09-07T09:00:00Z"
+    }}
+}}
+
+For an email request, return for example:
+{{
+    "need_tool": true,
+    "tool_name": "mock_mail",
+    "arguments": {{
+        "operation": "send",
+        "to": "recipient@example.test",
+        "subject": "Status",
+        "body": "Complete"
+    }}
 }}
 """
         print("\n" + "=" * 100)
@@ -419,7 +461,12 @@ If no tool is required:
 
         if need_tool:
 
-            if tool_name != "internet_search":
+            if tool_name not in (
+                "internet_search",
+                "mock_calendar",
+                "mock_mail",
+                "mock_email",
+            ):
 
                 return {
                     "need_tool": False,
@@ -429,6 +476,13 @@ If no tool is required:
                         f"Unsupported tool requested: "
                         f"{tool_name}"
                     )
+                }
+
+            if tool_name != "internet_search":
+                return {
+                    "need_tool": True,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
                 }
 
             query = arguments.get(
