@@ -15,6 +15,12 @@ class ToolRequest:
 
     request_id: str = ""
 
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def requester(self) -> str:
+        return self.agent
+
     def to_dict(self):
 
         return {
@@ -22,4 +28,5 @@ class ToolRequest:
             "agent": self.agent,
             "tool_name": self.tool_name,
             "arguments": self.arguments,
+            "metadata": self.metadata,
         }

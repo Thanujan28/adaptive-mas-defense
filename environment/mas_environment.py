@@ -18,11 +18,13 @@ from tools.tool_control_plane import ToolControlPlane
 from environment.events import MASEvent
 from environment.topology import CommunicationTopology
 from environment.memory import MemoryManager
+from environment.episode_state import EpisodeState
 from environment.resource_accounting import (
     ResourceBudget,
     TrackedLLM,
     truncate_tool_result,
     load_resource_budget,
+    LlamaTokenCounter,
 )
 
 
@@ -165,20 +167,26 @@ class MASEnvironment:
             "executor-2",
         ]
 
-        self.agent_mailboxes = {
-            agent: []
-            for agent in self.agent_names
-        }
+        self.agent_mailboxes = {}
 
         # =====================================================
         # MEMORY SYSTEM
         # =====================================================
 
         self.resource_budget = load_resource_budget(config_path)
+        self.token_counter = LlamaTokenCounter(
+            self.resource_budget.tokenizer_path
+        )
         self.memory = MemoryManager(
             self.agent_names,
             capacity=self.resource_budget.memory_capacity,
         )
+        self.episode_state = EpisodeState()
+        self.episode_state.mailboxes = {
+            agent: []
+            for agent in self.agent_names
+        }
+        self.agent_mailboxes = self.episode_state.mailboxes
 
         # =====================================================
         # TOOL SYSTEM
@@ -276,7 +284,7 @@ class MASEnvironment:
         # EVENT LOG
         # =====================================================
 
-        self.events = []
+        self.events = self.episode_state.events
 
         for agent_name, agent in self.agents.items():
             if hasattr(agent, "llm"):
@@ -285,13 +293,14 @@ class MASEnvironment:
                     agent_name=agent_name,
                     budget=self.resource_budget,
                     event_callback=self._record_llm_usage,
+                    token_counter=self.token_counter,
                 )
 
         # =====================================================
         # SHARED COMMUNICATION POOL
         # =====================================================
 
-        self.shared_pool = []
+        self.shared_pool = self.episode_state.shared_pool
 
         # =====================================================
         # BUILD LANGGRAPH WORKFLOW
@@ -335,6 +344,9 @@ class MASEnvironment:
     ):
 
         event.metadata.setdefault("topology", self.topology_name)
+        event.metadata.setdefault("episode_id", self.episode_state.episode_id)
+        if event.episode_id is None:
+            event.episode_id = self.episode_state.episode_id
 
         self.events.append(
             event
@@ -434,6 +446,8 @@ class MASEnvironment:
                     "topology": self.topology_name,
                     "tokens_used": self.resource_budget.tokens_used,
                     "token_limit": self.resource_budget.token_limit,
+                    "tokens_by_agent": dict(self.resource_budget.tokens_by_agent),
+                    "tokenizer": self.token_counter.source,
                     "status": status,
                 },
             )
@@ -470,6 +484,8 @@ class MASEnvironment:
             0,
             self.tool_manager.tool_limit - self.tool_manager.tools_used,
         )
+        state["tokens_by_agent"] = dict(self.resource_budget.tokens_by_agent)
+        state["tokenizer"] = self.token_counter.source
         return state
 
     def get_security_state(self) -> dict:
@@ -1200,6 +1216,11 @@ class MASEnvironment:
                 tool_name=tool_name,
                 arguments=arguments,
                 request_id=request_id,
+                metadata={
+                    "episode_id": self.episode_state.episode_id,
+                    "requesting_agent": requesting_agent,
+                    "topology": self.topology_name,
+                },
             )
 
             result = self.tool_control_plane.submit(
@@ -1731,6 +1752,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         item,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                     for item in result
                 )
@@ -1741,6 +1763,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         result,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                 )
 
@@ -1963,6 +1986,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         item,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                     for item in result
                 )
@@ -1973,6 +1997,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         result,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                 )
 
@@ -2171,6 +2196,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         item,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                     for item in result
                 )
@@ -2179,6 +2205,7 @@ class MASEnvironment:
                     truncate_tool_result(
                         result,
                         self.resource_budget.tool_result_tokens,
+                        self.token_counter,
                     )
                 )
 
@@ -2690,21 +2717,18 @@ class MASEnvironment:
         task: str
     ):
         # Every execute_task call is an independent episode.
-        self.memory.clear()
-        self.resource_budget.reset()
-        self.tool_manager.tools_used = 0
-        self.tool_manager.timed_out_tools = 0
-
-        self.agent_mailboxes = {
-        agent: []
-        for agent in self.agent_names
-    }
+        self.episode_state.reset(
+            self.agent_names,
+            self.memory,
+            self.resource_budget,
+        )
+        self.agent_mailboxes = self.episode_state.mailboxes
 
         # =====================================================
         # CLEAR EVENT LOG
         # =====================================================
 
-        self.events = []
+        self.events = self.episode_state.events
         self.log_event(
             MASEvent.create(
                 event_type="resource_reset",
@@ -2722,7 +2746,8 @@ class MASEnvironment:
         # Each execute_task() represents a new episode.
         # =====================================================
 
-        self.shared_pool = []
+        self.shared_pool = self.episode_state.shared_pool
+        self.episode_state.task = task
 
         # =====================================================
         # INITIAL LANGGRAPH STATE
@@ -2765,6 +2790,8 @@ class MASEnvironment:
         result = self.graph.invoke(
             initial_state
         )
+
+        self.episode_state.result = result
 
         return result[
             "final_result"

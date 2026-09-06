@@ -44,6 +44,8 @@ class MASEvent:
 
     request_id: Optional[str] = None
 
+    episode_id: Optional[str] = None
+
     result_count: int = 0
 
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -59,6 +61,7 @@ class MASEvent:
         memory_update: Optional[str] = None,
         token_usage: int = 0,
         request_id: Optional[str] = None,
+        episode_id: Optional[str] = None,
         result_count: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ):
@@ -81,6 +84,7 @@ class MASEvent:
             memory_update=memory_update,
             token_usage=token_usage,
             request_id=request_id or str(uuid.uuid4()),
+            episode_id=episode_id,
             result_count=result_count,
             metadata=metadata or {},
         )
@@ -100,6 +104,7 @@ class MASEvent:
             "memory_update": self.memory_update,
             "token_usage": self.token_usage,
             "request_id": self.request_id,
+            "episode_id": self.episode_id,
             "result_count": self.result_count,
             "metadata": self.metadata,
         }

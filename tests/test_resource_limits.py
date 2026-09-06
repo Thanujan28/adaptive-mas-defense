@@ -7,6 +7,8 @@ from environment.resource_accounting import (
     truncate_tool_result,
 )
 from tools.tool_manager import ToolManager
+from tools.tool_request import ToolRequest
+from tools.tool_control_plane import ToolControlPlane
 
 
 class _Response:
@@ -90,6 +92,23 @@ class ResourceLimitTests(unittest.TestCase):
             manager.execute("coordinator", "mock_calendar", {"operation": "list"})
         self.assertEqual(budget.timed_out_tools, 1)
         self.assertTrue(any(event[0] == "tool_timeout" for event in events))
+
+    def test_centralized_authorization_uses_requester_identity(self):
+        manager = ToolManager()
+        manager.set_topology("centralized")
+        manager.tools["mock_calendar"] = type(
+            "Calendar", (), {"list_events": lambda self: []}
+        )()
+        control_plane = ToolControlPlane(manager)
+        request = ToolRequest(
+            agent="executor-2",
+            tool_name="mock_calendar",
+            arguments={"operation": "list"},
+            request_id="request-1",
+            metadata={"requester": "executor-2"},
+        )
+        with self.assertRaises(PermissionError):
+            control_plane.submit(request, submitted_by="coordinator")
 
     def test_episode_reset_clears_counters(self):
         environment = MASEnvironment("shared_pool")

@@ -1,5 +1,15 @@
 import networkx as nx
-from typing import List
+from dataclasses import dataclass
+from typing import List, Tuple
+
+
+@dataclass(frozen=True)
+class TopologyDefinition:
+    """Immutable topology contract used for experiment comparison."""
+
+    name: str
+    nodes: Tuple[str, ...]
+    edges: Tuple[Tuple[str, str], ...]
 
 
 class CommunicationTopology:
@@ -101,6 +111,20 @@ class CommunicationTopology:
         """
 
         return self.graph
+
+    @property
+    def definition(self) -> TopologyDefinition:
+        return TopologyDefinition(
+            name=self.topology_name,
+            nodes=tuple(self.get_nodes()),
+            edges=tuple(self.get_edges()),
+        )
+
+    def is_reachable(self, sender: str, receiver: str) -> bool:
+        return nx.has_path(self.graph, sender, receiver)
+
+    def shortest_path(self, sender: str, receiver: str) -> Tuple[str, ...]:
+        return tuple(nx.shortest_path(self.graph, sender, receiver))
 
     def get_nodes(self) -> List[str]:
         """

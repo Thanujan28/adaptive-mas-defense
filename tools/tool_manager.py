@@ -222,24 +222,20 @@ class ToolManager:
         self,
         agent: str,
         tool_name: str,
-        arguments: Dict[str, Any]
+        arguments: Dict[str, Any],
+        authorization_agent: Optional[str] = None,
+        request_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
     ):
-        try:
-            invocation_number = self.resource_budget.record_tool()
-        except RuntimeError:
-            self._resource_event(
-                "tool_rejected", tool_name, "tool_budget_exhausted"
-            )
-            raise
-        self._resource_event(
-            "tool_usage", tool_name, "consumed", invocation_number
-        )
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(
             self._execute,
             agent,
             tool_name,
             arguments,
+                authorization_agent,
+                request_id,
+                metadata,
         )
         try:
             return future.result(timeout=self.tool_timeout_seconds)
@@ -263,7 +259,10 @@ class ToolManager:
         self,
         agent: str,
         tool_name: str,
-        arguments: Dict[str, Any]
+        arguments: Dict[str, Any],
+        authorization_agent: Optional[str] = None,
+        request_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
     ):
 
         # -----------------------------------------------------
@@ -302,7 +301,7 @@ class ToolManager:
         # -----------------------------------------------------
 
         if not self.is_allowed(
-            agent,
+            authorization_agent or agent,
             tool_name
         ):
 
@@ -322,6 +321,17 @@ class ToolManager:
             raise ValueError(
                 "Tool arguments must be a dictionary."
             )
+
+        try:
+            invocation_number = self.resource_budget.record_tool()
+        except RuntimeError:
+            self._resource_event(
+                "tool_rejected", tool_name, "tool_budget_exhausted"
+            )
+            raise
+        self._resource_event(
+            "tool_usage", tool_name, "consumed", invocation_number
+        )
 
         # =====================================================
         # INTERNET SEARCH

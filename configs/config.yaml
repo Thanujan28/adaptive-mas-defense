@@ -32,6 +32,7 @@ model:
   num_gpu: 0
   num_ctx: 4096
   keep_alive: 5m
+  tokenizer_path: null
 
 calendar:
   database_path: configs/mock_calendar.json

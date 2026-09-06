@@ -47,4 +47,7 @@ class ToolControlPlane:
             agent=execution_agent,
             tool_name=request.tool_name,
             arguments=request.arguments,
+            authorization_agent=request.requester,
+            request_id=request.request_id,
+            metadata=request.metadata,
         )

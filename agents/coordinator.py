@@ -203,6 +203,9 @@ class CoordinatorAgent:
             tool_name=tool_name,
             arguments=arguments,
             request_id=request_id,
+            metadata={
+                "requesting_agent": agent,
+            },
         )
 
         if self.tool_control_plane is not None:

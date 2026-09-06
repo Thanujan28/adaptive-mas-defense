@@ -1,5 +1,9 @@
 import argparse
+import hashlib
 import json
+import random
+import platform
+import sys
 from pathlib import Path
 
 from benchmark import build_benchmark
@@ -18,7 +22,18 @@ def run_experiment(
     limit: int | None = None,
     episodes: int = 30,
     pilot_repetitions: int = 3,
+    seed: int = 20260906,
 ):
+    random.seed(seed)
+    config_bytes = Path("configs/config.yaml").read_bytes()
+    experiment_metadata = {
+        "seed": seed,
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "model": "llama3.1:8b",
+        "runner_version": "resource-controlled-v1",
+    }
     results = []
     tasks = build_benchmark()[:limit] if limit is not None else build_benchmark()
     for topology in TOPOLOGIES:
@@ -40,6 +55,7 @@ def run_experiment(
                     "family": task_spec["family"],
                     "topology": topology,
                     "attack_condition": attack_condition,
+                    "experiment_metadata": experiment_metadata,
                     **ppo_result,
                 })
     path = Path(output_path)
@@ -105,10 +121,12 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="outputs/experiment_results.json")
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--pilot-repetitions", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=20260906)
     args = parser.parse_args()
     run_experiment(
         output_path=args.output,
         limit=args.limit,
         episodes=args.episodes,
         pilot_repetitions=args.pilot_repetitions,
+        seed=args.seed,
     )
