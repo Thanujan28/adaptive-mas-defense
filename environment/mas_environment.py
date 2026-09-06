@@ -18,6 +18,11 @@ from tools.tool_control_plane import ToolControlPlane
 from environment.events import MASEvent
 from environment.topology import CommunicationTopology
 from environment.memory import MemoryManager
+from environment.resource_accounting import (
+    ResourceBudget,
+    TrackedLLM,
+    truncate_tool_result,
+)
 
 
 # =============================================================
@@ -171,11 +176,16 @@ class MASEnvironment:
             self.agent_names
         )
 
+        self.resource_budget = ResourceBudget()
+
         # =====================================================
         # TOOL SYSTEM
         # =====================================================
 
-        self.tool_manager = ToolManager()
+        self.tool_manager = ToolManager(
+            tool_limit=self.resource_budget.tool_limit,
+            tool_timeout_seconds=self.resource_budget.tool_timeout_seconds,
+        )
         self.tool_control_plane = ToolControlPlane(
             self.tool_manager
         )
@@ -266,6 +276,15 @@ class MASEnvironment:
 
         self.events = []
 
+        for agent_name, agent in self.agents.items():
+            if hasattr(agent, "llm"):
+                agent.llm = TrackedLLM(
+                    agent.llm,
+                    agent_name=agent_name,
+                    budget=self.resource_budget,
+                    event_callback=self._record_llm_usage,
+                )
+
         # =====================================================
         # SHARED COMMUNICATION POOL
         # =====================================================
@@ -312,6 +331,8 @@ class MASEnvironment:
         self,
         event: MASEvent
     ):
+
+        event.metadata.setdefault("topology", self.topology_name)
 
         self.events.append(
             event
@@ -363,6 +384,73 @@ class MASEnvironment:
 
         print(
             "-" * 70
+        )
+
+    def record_security_event(
+        self,
+        event_type: str,
+        sender: str = "security_monitor",
+        receiver: Optional[str] = None,
+        content: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ):
+        """Record attack, investigation, containment, or allocation evidence."""
+        if event_type not in {
+            "attack",
+            "investigation",
+            "containment",
+            "resource_allocation",
+        }:
+            raise ValueError(f"Unsupported security event: {event_type}")
+        self.log_event(
+            MASEvent.create(
+                event_type=event_type,
+                sender=sender,
+                receiver=receiver,
+                content=content,
+                metadata={
+                    "topology": self.topology_name,
+                    **(metadata or {}),
+                },
+            )
+        )
+
+    def _record_llm_usage(self, agent_name: str, token_usage: int):
+        self.log_event(
+            MASEvent.create(
+                event_type="llm_usage",
+                sender=agent_name,
+                token_usage=token_usage,
+                metadata={
+                    "agent": agent_name,
+                    "topology": self.topology_name,
+                    "tokens_used": self.resource_budget.tokens_used,
+                    "token_limit": self.resource_budget.token_limit,
+                },
+            )
+        )
+
+    def get_resource_state(self) -> dict:
+        state = self.resource_budget.as_dict()
+        state["tools_used"] = self.tool_manager.tools_used
+        state["timed_out_tools"] = self.tool_manager.timed_out_tools
+        state["tool_budget_remaining"] = max(
+            0,
+            self.tool_manager.tool_limit - self.tool_manager.tools_used,
+        )
+        return state
+
+    def get_security_state(self) -> dict:
+        from security.state_builder import SecurityStateBuilder
+
+        memory_counts = {
+            name: self.memory.get_memory(name).count()
+            for name in self.agent_names
+        }
+        return SecurityStateBuilder().build(
+            self.get_events(),
+            self.get_resource_state(),
+            memory_counts,
         )
 
     # =========================================================
@@ -1607,11 +1695,14 @@ class MASEnvironment:
 
             if isinstance(result, list):
 
-                tool_results.extend(result)
+                tool_results.extend(
+                    truncate_tool_result(item)
+                    for item in result
+                )
 
             else:
 
-                tool_results.append(result)
+                tool_results.append(truncate_tool_result(result))
 
         # =====================================================
         # RESEARCHER EXECUTION
@@ -1829,14 +1920,13 @@ class MASEnvironment:
             if isinstance(result, list):
 
                 tool_results.extend(
-                    result
+                    truncate_tool_result(item)
+                    for item in result
                 )
 
             else:
 
-                tool_results.append(
-                    result
-                )
+                tool_results.append(truncate_tool_result(result))
 
         # =====================================================
         # ANALYST RUN
@@ -2029,9 +2119,12 @@ class MASEnvironment:
                 result = []
 
             if isinstance(result, list):
-                tool_results.extend(result)
+                tool_results.extend(
+                    truncate_tool_result(item)
+                    for item in result
+                )
             else:
-                tool_results.append(result)
+                tool_results.append(truncate_tool_result(result))
 
         # =====================================================
         # EXECUTOR RUN
@@ -2501,6 +2594,24 @@ class MASEnvironment:
             ) from exc
 
         for current, next_agent in zip(path, path[1:]):
+            if next_agent != receiver:
+                self.log_event(
+                    MASEvent.create(
+                        event_type="message_relay",
+                        sender=current,
+                        receiver=next_agent,
+                        content=(
+                            f"Relaying message toward {receiver}"
+                        ),
+                        metadata={
+                            "topology": self.topology_name,
+                            "final_receiver": receiver,
+                            "path": path,
+                            "hop_index": path.index(next_agent),
+                            "hop_count": len(path) - 1,
+                        },
+                    )
+                )
             self.send_message(
                 sender=current,
                 receiver=next_agent,
@@ -2522,6 +2633,12 @@ class MASEnvironment:
         self,
         task: str
     ):
+        # Every execute_task call is an independent episode.
+        self.memory.clear()
+        self.resource_budget.reset()
+        self.tool_manager.tools_used = 0
+        self.tool_manager.timed_out_tools = 0
+
         self.agent_mailboxes = {
         agent: []
         for agent in self.agent_names

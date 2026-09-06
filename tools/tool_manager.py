@@ -1,4 +1,5 @@
-from typing import Dict, Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import Dict, Any, Optional
 
 from tools.internet_search import InternetSearchTool
 from tools.academic_search import AcademicSearchTool
@@ -10,7 +11,11 @@ from tools.mock_email import MockEmailTool
 
 class ToolManager:
 
-    def __init__(self):
+    def __init__(self, tool_limit: int = 50, tool_timeout_seconds: float = 30.0):
+        self.tool_limit = tool_limit
+        self.tool_timeout_seconds = tool_timeout_seconds
+        self.tools_used = 0
+        self.timed_out_tools = 0
 
         # =====================================================
         # AVAILABLE TOOLS
@@ -176,6 +181,36 @@ class ToolManager:
     # =========================================================
 
     def execute(
+        self,
+        agent: str,
+        tool_name: str,
+        arguments: Dict[str, Any]
+    ):
+        if self.tools_used >= self.tool_limit:
+            raise RuntimeError("Tool invocation budget exhausted.")
+
+        self.tools_used += 1
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            self._execute,
+            agent,
+            tool_name,
+            arguments,
+        )
+        try:
+            return future.result(timeout=self.tool_timeout_seconds)
+        except TimeoutError as exc:
+            self.timed_out_tools += 1
+            future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise TimeoutError(
+                f"Tool '{tool_name}' exceeded the {self.tool_timeout_seconds}s timeout."
+            ) from exc
+        finally:
+            if not future.running():
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    def _execute(
         self,
         agent: str,
         tool_name: str,

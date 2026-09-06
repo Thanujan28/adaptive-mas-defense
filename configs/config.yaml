@@ -1,0 +1,40 @@
+experiment:
+  benchmark_tasks: 120
+  task_families:
+    - research_synthesis
+    - security_analysis
+    - calendar_coordination
+    - email_coordination
+  topologies:
+    - centralized
+    - layered
+    - fully_connected
+    - shared_pool
+  attack_conditions:
+    - clean
+    - memory_poisoning
+    - prompt_infection
+    - resource_exhaustion
+  evaluation_episodes: 30
+  pilot_repetitions: 3
+
+budgets:
+  token_limit: 200000
+  tool_limit: 50
+  tool_timeout_seconds: 30
+  tool_result_tokens: 2000
+  memory_capacity: 100
+
+model:
+  provider: ollama
+  name: llama3.1:8b
+  temperature: 0
+  num_gpu: 0
+  num_ctx: 4096
+  keep_alive: 5m
+
+calendar:
+  database_path: configs/mock_calendar.json
+
+email:
+  mailhog_api_url: http://localhost:8025

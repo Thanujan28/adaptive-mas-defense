@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
+import re
 
 
 @dataclass
@@ -30,14 +31,18 @@ class MemoryRecord:
 
 class AgentMemory:
     """
-    Simple per-agent episodic memory.
+    Importance-weighted per-agent episodic memory.
 
     Each agent has its own independent memory store.
 
-    This is intentionally implemented without embeddings or
-    vector databases. It provides a clean baseline for later
-    experiments involving memory poisoning and memory attacks.
+    Retrieval ranks lexical query overlap first, then importance,
+    then recency. The store is capped at 100 entries; when full,
+    the lowest-ranked record (importance, then oldest) is evicted.
+    This keeps the experiment deterministic without requiring an
+    embedding service.
     """
+
+    CAPACITY = 100
 
     def __init__(self, agent_name: str):
         self.agent_name = agent_name
@@ -70,6 +75,16 @@ class AgentMemory:
 
         self.memories.append(memory)
 
+        if len(self.memories) > self.CAPACITY:
+            eviction_index = min(
+                range(len(self.memories)),
+                key=lambda index: (
+                    self.memories[index].importance,
+                    self.memories[index].timestamp,
+                ),
+            )
+            self.memories.pop(eviction_index)
+
         return memory
 
     # =========================================================
@@ -85,21 +100,20 @@ class AgentMemory:
         if not self.memories:
             return []
 
-        # -----------------------------------------------------
-        # Baseline retrieval:
-        #
-        # 1. Higher importance
-        # 2. More recent memories
-        #
-        # Query-based semantic retrieval will be added later.
-        # -----------------------------------------------------
+        query_terms = set(
+            re.findall(r"[a-z0-9]+", (query or "").lower())
+        )
+
+        def retrieval_score(memory: MemoryRecord):
+            content_terms = set(
+                re.findall(r"[a-z0-9]+", memory.content.lower())
+            )
+            overlap = len(query_terms & content_terms)
+            return overlap, memory.importance, memory.timestamp
 
         memories = sorted(
             self.memories,
-            key=lambda memory: (
-                memory.importance,
-                memory.timestamp
-            ),
+            key=retrieval_score,
             reverse=True
         )
 
