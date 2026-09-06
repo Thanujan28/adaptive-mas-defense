@@ -157,11 +157,31 @@ class CommunicationTopology:
             topology_name="layered"
         )
 
-        required_agents = {
+        legacy_agents = {
             "coordinator",
             "researcher",
             "analyst",
-            "executor"
+            "executor",
+        }
+        if set(agents) == legacy_agents:
+            topology = CommunicationTopology(agents, topology_name="layered")
+            for first, second in (
+                ("coordinator", "researcher"),
+                ("researcher", "analyst"),
+                ("analyst", "executor"),
+            ):
+                topology.add_bidirectional_connection(first, second)
+            return topology
+
+        required_agents = {
+            "coordinator",
+            "planner",
+            "researcher-1",
+            "researcher-2",
+            "analyst-1",
+            "analyst-2",
+            "executor-1",
+            "executor-2",
         }
 
         missing = required_agents - set(agents)
@@ -173,29 +193,30 @@ class CommunicationTopology:
                 f"Missing: {sorted(missing)}"
             )
 
-        # Layer 1 <-> Layer 2
-        topology.add_bidirectional_connection(
-            "coordinator",
-            "researcher"
-        )
+        layers = [
+            ["coordinator"],
+            ["planner"],
+            ["researcher-1", "researcher-2"],
+            ["analyst-1", "analyst-2"],
+            ["executor-1", "executor-2"],
+        ]
 
-        # Layer 2 <-> Layer 3
-        topology.add_bidirectional_connection(
-            "researcher",
-            "analyst"
-        )
+        for layer in layers:
+            for sender in layer:
+                for receiver in layer:
+                    if sender != receiver:
+                        topology.add_connection(sender, receiver)
 
-        # Layer 3 <-> Layer 4
-        topology.add_bidirectional_connection(
-            "analyst",
-            "executor"
-        )
+        for current_layer, next_layer in zip(layers, layers[1:]):
+            for sender in current_layer:
+                for receiver in next_layer:
+                    topology.add_bidirectional_connection(sender, receiver)
 
         return topology
 
 
     @staticmethod
-    def decentralized(agents: List[str]):
+    def fully_connected(agents: List[str]):
         """
         Decentralized peer-to-peer topology.
 
@@ -203,7 +224,10 @@ class CommunicationTopology:
         with every other agent.
         """
 
-        topology = CommunicationTopology(agents)
+        topology = CommunicationTopology(
+            agents,
+            topology_name="fully_connected"
+        )
 
         for sender in agents:
             for receiver in agents:
@@ -217,6 +241,11 @@ class CommunicationTopology:
         return topology
 
     @staticmethod
+    def decentralized(agents: List[str]):
+        """Compatibility alias for the fully connected peer-to-peer topology."""
+        return CommunicationTopology.fully_connected(agents)
+
+    @staticmethod
     def centralized(agents: List[str]):
         """
         Centralized topology.
@@ -225,7 +254,10 @@ class CommunicationTopology:
         the Coordinator.
         """
 
-        topology = CommunicationTopology(agents)
+        topology = CommunicationTopology(
+            agents,
+            topology_name="centralized"
+        )
 
         coordinator = "coordinator"
 
@@ -251,10 +283,8 @@ class CommunicationTopology:
         import matplotlib.pyplot as plt
 
         pos = {
-            "coordinator": (0, 3),
-            "analyst": (0, 2),
-            "researcher": (0, 1),
-            "executor": (0, 0),
+            agent: (index % 3, -(index // 3))
+            for index, agent in enumerate(self.agents)
         }
 
         nx.draw_networkx(
@@ -311,8 +341,8 @@ class CommunicationTopology:
         if name == "layered":
             return CommunicationTopology.layered(agents)
 
-        if name == "decentralized":
-            return CommunicationTopology.decentralized(agents)
+        if name in ("fully_connected", "peer_to_peer", "decentralized"):
+            return CommunicationTopology.fully_connected(agents)
 
         if name == "centralized":
             return CommunicationTopology.centralized(agents)
@@ -322,8 +352,7 @@ class CommunicationTopology:
 
         raise ValueError(
             f"Unknown topology: {name}. "
-            f"Use layered, decentralized, "
-            f"centralized, or shared_pool."
+            f"Use layered, fully_connected, centralized, or shared_pool."
         )
 
         

@@ -4,6 +4,8 @@ from tools.internet_search import InternetSearchTool
 from tools.academic_search import AcademicSearchTool
 from tools.source_collector import SourceCollector
 from tools.report_writer import ReportWriterTool
+from tools.mock_calendar import MockCalendarTool
+from tools.mock_email import MockEmailTool
 
 
 class ToolManager:
@@ -27,6 +29,12 @@ class ToolManager:
 
             "report_writer":
                 ReportWriterTool(),
+
+            "mock_calendar":
+                MockCalendarTool(),
+
+            "mock_email":
+                MockEmailTool(),
         }
 
         # =====================================================
@@ -38,9 +46,8 @@ class ToolManager:
         # communication topology.
         #
         # Coordinator -> authorized
-        # Researcher  -> authorized
-        # Analyst     -> authorized
-        # Executor    -> NOT authorized
+        # Planner, Researchers, and Analysts -> authorized
+        # Executors -> NOT authorized
         #
         # This policy is identical for every topology.
         # =====================================================
@@ -52,21 +59,69 @@ class ToolManager:
                 "academic_search",
                 "source_collector",
                 "report_writer",
+                "mock_calendar",
+                "mock_email",
             ],
 
+            "planner": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+            ],
+
+            "researcher-1": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+            ],
+
+            "researcher-2": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+            ],
+
+            "analyst-1": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+            ],
+
+            "analyst-2": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+            ],
+
+            "executor-1": ["mock_email"],
+            "executor-2": ["mock_email"],
+
+            # Compatibility aliases for the former four-agent API.
             "researcher": [
                 "internet_search",
                 "academic_search",
                 "source_collector",
+                "mock_calendar",
+                "mock_email",
             ],
-
             "analyst": [
                 "internet_search",
                 "academic_search",
                 "source_collector",
+                "mock_calendar",
+                "mock_email",
             ],
-
-            "executor": [],
+            "executor": ["mock_email"],
         }
 
         self.current_topology = None
@@ -224,6 +279,39 @@ class ToolManager:
                 content=content,
                 filename=filename
             )
+
+        if tool_name == "mock_calendar":
+            operation = arguments.get("operation", "list")
+            calendar = self.tools["mock_calendar"]
+            if operation == "create":
+                return calendar.create_event(**{
+                    key: arguments[key]
+                    for key in ("title", "start", "end", "description", "location")
+                    if key in arguments
+                })
+            if operation == "list":
+                return calendar.list_events()
+            if operation == "get":
+                return calendar.get_event(arguments.get("event_id"))
+            if operation == "delete":
+                return calendar.delete_event(arguments.get("event_id"))
+            raise ValueError(f"Unknown mock_calendar operation: {operation}")
+
+        if tool_name == "mock_email":
+            operation = arguments.get("operation", "send")
+            email = self.tools["mock_email"]
+            if operation == "send":
+                return email.send_email(
+                    to=arguments.get("to"),
+                    subject=arguments.get("subject"),
+                    body=arguments.get("body"),
+                    sender=arguments.get("sender", "mas@localhost"),
+                )
+            if operation == "list":
+                return email.list_messages()
+            if operation == "get":
+                return email.get_message(arguments.get("message_id"))
+            raise ValueError(f"Unknown mock_email operation: {operation}")
 
         raise ValueError(
             f"No execution handler for tool '{tool_name}'."

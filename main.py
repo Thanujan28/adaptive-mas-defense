@@ -8,7 +8,7 @@ def main():
     print("=" * 60)
 
     environment = MASEnvironment(
-        topology_name="decentralized",
+        topology_name="shared_pool",
     )
 
     print("\nCommunication topology:")

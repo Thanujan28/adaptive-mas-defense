@@ -105,7 +105,8 @@ class CoordinatorAgent:
         self,
         agent: str,
         tool_name: str,
-        arguments: dict
+        arguments: dict,
+        request_id: str = ""
     ):
         """
         Route a centralized tool request from an agent through the
@@ -201,6 +202,7 @@ class CoordinatorAgent:
             agent=agent,
             tool_name=tool_name,
             arguments=arguments,
+            request_id=request_id,
         )
 
         if self.tool_control_plane is not None:

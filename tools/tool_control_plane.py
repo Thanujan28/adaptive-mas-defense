@@ -24,9 +24,12 @@ class ToolControlPlane:
                 "in centralized topology."
             )
 
-        if submitted_by == "executor":
+        if (
+            submitted_by.startswith("executor")
+            and request.tool_name != "mock_email"
+        ):
             raise PermissionError(
-                "Executor is not authorized to submit tool requests."
+                "Executors are only authorized to submit mock email requests."
             )
 
         execution_agent = (

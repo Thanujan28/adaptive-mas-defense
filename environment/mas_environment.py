@@ -6,6 +6,7 @@ import networkx as nx
 from langgraph.graph import StateGraph, START, END
 
 from agents.coordinator import CoordinatorAgent
+from agents.planner import PlannerAgent
 from agents.researcher import ResearcherAgent
 from agents.analyst import AnalystAgent
 from agents.executor import ExecutorAgent
@@ -148,9 +149,13 @@ class MASEnvironment:
 
         self.agent_names = [
             "coordinator",
-            "analyst",
-            "researcher",
-            "executor",
+            "planner",
+            "researcher-1",
+            "researcher-2",
+            "analyst-1",
+            "analyst-2",
+            "executor-1",
+            "executor-2",
         ]
 
         self.agent_mailboxes = {
@@ -188,32 +193,47 @@ class MASEnvironment:
             tool_control_plane=self.tool_control_plane
         )
 
-        self.analyst = AnalystAgent(
-            name="analyst",
-            memory=self.memory.get_memory(
-                "analyst"
-            )
+        self.planner = PlannerAgent(
+            name="planner",
+            memory=self.memory.get_memory("planner")
         )
 
-        self.researcher = ResearcherAgent(
-            name="researcher",
-            memory=self.memory.get_memory(
-                "researcher"
-            )
+        self.researcher_1 = ResearcherAgent(
+            name="researcher-1",
+            memory=self.memory.get_memory("researcher-1")
+        )
+        self.researcher_2 = ResearcherAgent(
+            name="researcher-2",
+            memory=self.memory.get_memory("researcher-2")
         )
 
-        self.executor = ExecutorAgent(
-            name="executor",
-            memory=self.memory.get_memory(
-                "executor"
-            )
+        self.analyst_1 = AnalystAgent(
+            name="analyst-1",
+            memory=self.memory.get_memory("analyst-1")
+        )
+        self.analyst_2 = AnalystAgent(
+            name="analyst-2",
+            memory=self.memory.get_memory("analyst-2")
+        )
+
+        self.executor_1 = ExecutorAgent(
+            name="executor-1",
+            memory=self.memory.get_memory("executor-1")
+        )
+        self.executor_2 = ExecutorAgent(
+            name="executor-2",
+            memory=self.memory.get_memory("executor-2")
         )
 
         self.agents = {
             "coordinator": self.coordinator,
-            "analyst": self.analyst,
-            "researcher": self.researcher,
-            "executor": self.executor,
+            "planner": self.planner,
+            "researcher-1": self.researcher_1,
+            "researcher-2": self.researcher_2,
+            "analyst-1": self.analyst_1,
+            "analyst-2": self.analyst_2,
+            "executor-1": self.executor_1,
+            "executor-2": self.executor_2,
         }
 
         # =====================================================
@@ -510,6 +530,18 @@ class MASEnvironment:
     # =========================================================
     # RECEIVE AGENT MESSAGE
     # =========================================================
+
+    def _delivery_sender(self, source: str, receiver: str) -> str:
+        """Return the sender recorded on the final topology hop."""
+        if self.topology_name == "shared_pool":
+            return source
+
+        path = nx.shortest_path(
+            self.topology.get_graph(),
+            source,
+            receiver
+        )
+        return path[-2] if len(path) > 1 else source
 
     def receive_agent_message(
         self,
@@ -838,10 +870,46 @@ class MASEnvironment:
                 expected_sender=requesting_agent,
             )
 
+            self.log_event(
+                MASEvent.create(
+                    event_type="tool_forward",
+                    sender="coordinator",
+                    receiver="tool_manager",
+                    content=(
+                        f"Coordinator forwarded '{tool_name}' request"
+                    ),
+                    tool_call=tool_name,
+                    request_id=request_id,
+                    metadata={
+                        "requesting_agent": requesting_agent,
+                        "topology": self.topology_name,
+                        "routed_by": "coordinator",
+                        "authorization_result": "allowed",
+                    },
+                )
+            )
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="tool_execution",
+                    sender="tool_control_plane",
+                    receiver=tool_name,
+                    content=f"Executing tool '{tool_name}'",
+                    tool_call=tool_name,
+                    request_id=request_id,
+                    metadata={
+                        "requesting_agent": requesting_agent,
+                        "topology": self.topology_name,
+                        "authorization_result": "allowed",
+                    },
+                )
+            )
+
             result = self.coordinator.handle_tool_request(
                 agent=requesting_agent,
                 tool_name=routed_request["tool_name"],
                 arguments=routed_request["arguments"],
+                request_id=request_id,
             )
 
             self.publish_agent_result(
@@ -898,8 +966,35 @@ class MASEnvironment:
                             "success",
 
                         "routed_by":
-                            "coordinator"
+                            "coordinator",
+
+                        "topology":
+                            self.topology_name,
+
+                        "authorization_result":
+                            "allowed"
                     }
+                )
+            )
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="tool_result_delivery",
+                    sender="coordinator",
+                    receiver=requesting_agent,
+                    content=(
+                        f"Tool '{tool_name}' result delivered "
+                        f"to {requesting_agent}"
+                    ),
+                    tool_call=tool_name,
+                    request_id=request_id,
+                    result_count=result_count,
+                    metadata={
+                        "requesting_agent": requesting_agent,
+                        "topology": self.topology_name,
+                        "routed_by": "coordinator",
+                        "authorization_result": "allowed",
+                    },
                 )
             )
 
@@ -926,14 +1021,17 @@ class MASEnvironment:
                     "requesting_agent":
                         requesting_agent,
 
+                    "topology":
+                        self.topology_name,
+
                     "argument_keys":
                         argument_keys,
 
                     "argument_count":
                         len(argument_keys),
 
-                    "topology":
-                        self.topology_name
+                    "authorization_result":
+                        "allowed"
                 }
             )
         )
@@ -960,7 +1058,13 @@ class MASEnvironment:
 
                 metadata={
                     "requesting_agent":
-                        requesting_agent
+                        requesting_agent,
+
+                    "topology":
+                        self.topology_name,
+
+                    "authorization_result":
+                        "allowed"
                 }
             )
         )
@@ -1052,6 +1156,9 @@ class MASEnvironment:
                     "requesting_agent":
                         requesting_agent,
 
+                    "topology":
+                        self.topology_name,
+
                     "result_type":
                         type(result).__name__,
 
@@ -1059,7 +1166,10 @@ class MASEnvironment:
                         result_count,
 
                     "status":
-                        "success"
+                        "success",
+
+                    "authorization_result":
+                        "allowed"
                 }
             )
         )
@@ -1091,11 +1201,17 @@ class MASEnvironment:
                     "requesting_agent":
                         requesting_agent,
 
+                    "topology":
+                        self.topology_name,
+
                     "result_type":
                         type(result).__name__,
 
                     "result_count":
-                        result_count
+                        result_count,
+
+                    "authorization_result":
+                        "allowed"
                 }
             )
         )
@@ -1335,17 +1451,39 @@ class MASEnvironment:
 
         self.publish_agent_result(
             sender="coordinator",
-            receiver="researcher",
-            content=plan["research"],
-            metadata={
-                "stage": "research_assignment"
-            }
+            receiver="planner",
+            content=plan,
+            metadata={"stage": "planning_assignment"}
         )
 
         return {
             "plan": plan,
             "error": None
         }
+    # =========================================================
+    # PLANNER NODE
+    # =========================================================
+
+    def planner_node(self, state: MASState):
+        coordinator_plan = self.receive_agent_message(
+            receiver="planner",
+            expected_sender="coordinator"
+        )
+        if coordinator_plan is None:
+            raise ValueError("Planner received no Coordinator plan.")
+
+        plan = self.planner.create_execution_plan(
+            state["task"],
+            coordinator_plan
+        )
+        self.publish_agent_result(
+            sender="planner",
+            receiver="researcher-1",
+            content=plan,
+            metadata={"stage": "research_assignment"}
+        )
+        return {"plan": plan}
+
     # =========================================================
     # RESEARCHER NODE
     # =========================================================
@@ -1356,7 +1494,9 @@ class MASEnvironment:
 
     def research_node(
         self,
-        state: MASState
+        state: MASState,
+        agent_name="researcher-1",
+        next_agent="researcher-2"
     ):
         """
         Execute the Researcher stage.
@@ -1384,15 +1524,35 @@ class MASEnvironment:
         # RECEIVE COORDINATOR INSTRUCTION
         # =====================================================
 
-        research_instruction = self.receive_agent_message(
-            receiver="researcher",
-            expected_sender="coordinator"
+        research_message = self.receive_agent_message(
+            receiver=agent_name,
+            expected_sender=self._delivery_sender(
+                "planner" if agent_name == "researcher-1" else "researcher-1",
+                agent_name
+            )
         )
 
-        if research_instruction is None:
-            raise ValueError(
-                "Researcher received no research instruction."
+        if research_message is None:
+            raise ValueError(f"{agent_name} received no research instruction.")
+
+        research_instruction = (
+            research_message.get("research", "")
+            if isinstance(research_message, dict)
+            else research_message
+        )
+        research_instruction = (
+            (
+                "Perform broad discovery across the topic. Identify the main "
+                "facts, concepts, candidate sources, and open questions.\n\n"
             )
+            if agent_name == "researcher-1"
+            else (
+                "Independently collect and verify evidence. Check the first "
+                "researcher's claims, record supporting or conflicting sources, "
+                "and identify evidence gaps.\n\n"
+            )
+        ) + str(research_instruction)
+        worker = self.agents[agent_name]
 
         # =====================================================
         # SHARED POOL READ
@@ -1410,7 +1570,7 @@ class MASEnvironment:
         # =====================================================
 
         self.read_memory(
-            agent_name="researcher",
+            agent_name=agent_name,
             query=research_instruction,
             top_k=3
         )
@@ -1420,7 +1580,7 @@ class MASEnvironment:
         # =====================================================
 
         tool_request = (
-            self.researcher.create_tool_request(
+            worker.create_tool_request(
                 research_instruction
             )
         )
@@ -1457,7 +1617,7 @@ class MASEnvironment:
         # RESEARCHER EXECUTION
         # =====================================================
 
-        research_result = self.researcher.run(
+        research_result = worker.run(
             research_instruction,
             tool_results=tool_results
         )
@@ -1469,7 +1629,7 @@ class MASEnvironment:
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
-                sender="researcher",
+                sender=agent_name,
                 content=(
                     "Researcher completed "
                     "research stage"
@@ -1491,7 +1651,7 @@ class MASEnvironment:
         # =====================================================
 
         self.log_memory_write(
-            agent_name="researcher",
+            agent_name=agent_name,
             content=(
                 f"Research result for assignment:\n"
                 f"{research_instruction}\n\n"
@@ -1510,8 +1670,8 @@ class MASEnvironment:
         # =====================================================
 
         self.publish_agent_result(
-            sender="researcher",
-            receiver="analyst",
+            sender=agent_name,
+            receiver=next_agent,
             content=research_result,
             metadata={
                 "stage": "research",
@@ -1542,7 +1702,9 @@ class MASEnvironment:
 
     def analysis_node(
         self,
-        state: MASState
+        state: MASState,
+        agent_name="analyst-1",
+        next_agent="analyst-2"
     ):
         """
         Execute the Analyst stage.
@@ -1561,17 +1723,27 @@ class MASEnvironment:
         analysis_instruction = plan[
             "analysis"
         ]
+        analysis_instruction = (
+            (
+                "Perform the primary analysis using the available findings. "
+                "Develop the central interpretation and conclusions.\n\n"
+            )
+            if agent_name == "analyst-1"
+            else (
+                "Verify the primary analysis. Look for unsupported claims, "
+                "contradictions, missing evidence, and inconsistencies.\n\n"
+            )
+        ) + str(analysis_instruction)
 
         # =====================================================
         # RECEIVE RESEARCH RESULT
         # =====================================================
 
         research = self.receive_agent_message(
-            receiver="analyst",
-            expected_sender=(
-                "coordinator"
-                if self.topology_name == "centralized"
-                else "researcher"
+            receiver=agent_name,
+            expected_sender=self._delivery_sender(
+                "researcher-2" if agent_name == "analyst-1" else "analyst-1",
+                agent_name
             )
         )
 
@@ -1611,7 +1783,7 @@ class MASEnvironment:
         # =====================================================
 
         self.read_memory(
-            agent_name="analyst",
+            agent_name=agent_name,
             query=analysis_instruction,
             top_k=3
         )
@@ -1621,7 +1793,7 @@ class MASEnvironment:
         # =====================================================
 
         tool_request = (
-            self.analyst.create_tool_request(
+            self.agents[agent_name].create_tool_request(
                 analysis_instruction=
                     analysis_instruction,
 
@@ -1670,7 +1842,7 @@ class MASEnvironment:
         # ANALYST RUN
         # =====================================================
 
-        analysis_result = self.analyst.run(
+        analysis_result = self.agents[agent_name].run(
             analysis_instruction,
 
             research,
@@ -1690,7 +1862,7 @@ class MASEnvironment:
             MASEvent.create(
                 event_type="agent_result",
 
-                sender="analyst",
+                sender=agent_name,
 
                 content=(
                     "Analyst completed "
@@ -1720,7 +1892,7 @@ class MASEnvironment:
         # =====================================================
 
         self.log_memory_write(
-            agent_name="analyst",
+            agent_name=agent_name,
 
             content=(
                 f"Analysis assignment:\n"
@@ -1745,8 +1917,8 @@ class MASEnvironment:
         # =====================================================
 
         self.publish_agent_result(
-            sender="analyst",
-            receiver="executor",
+            sender=agent_name,
+            receiver=next_agent,
             content=analysis_result,
             metadata={
                 "stage":
@@ -1766,7 +1938,9 @@ class MASEnvironment:
 
     def execution_node(
         self,
-        state: MASState
+        state: MASState,
+        agent_name="executor-1",
+        next_agent="executor-2"
     ):
         """
         Execute the Executor stage.
@@ -1787,17 +1961,27 @@ class MASEnvironment:
         execution_instruction = plan[
             "execution"
         ]
+        execution_instruction = (
+            (
+                "Perform the downstream task using the verified analysis. "
+                "Produce the requested substantive output.\n\n"
+            )
+            if agent_name == "executor-1"
+            else (
+                "Validate the downstream output for completeness, consistency, "
+                "and compliance with the task before returning it.\n\n"
+            )
+        ) + str(execution_instruction)
 
         # =====================================================
         # RECEIVE ANALYST RESULT
         # =====================================================
 
         analysis = self.receive_agent_message(
-            receiver="executor",
-            expected_sender=(
-                "coordinator"
-                if self.topology_name == "centralized"
-                else "analyst"
+            receiver=agent_name,
+            expected_sender=self._delivery_sender(
+                "analyst-2" if agent_name == "executor-1" else "executor-1",
+                agent_name
             )
         )
 
@@ -1822,7 +2006,7 @@ class MASEnvironment:
         # =====================================================
 
         self.read_memory(
-            agent_name="executor",
+            agent_name=agent_name,
             query=execution_instruction,
             top_k=3
         )
@@ -1847,7 +2031,7 @@ class MASEnvironment:
         # EXECUTOR RUN
         # =====================================================
 
-        execution_result = self.executor.run(
+        execution_result = self.agents[agent_name].run(
             execution_instruction,
 
             analysis,
@@ -1863,7 +2047,7 @@ class MASEnvironment:
             MASEvent.create(
                 event_type="agent_result",
 
-                sender="executor",
+                sender=agent_name,
 
                 content=execution_result,
 
@@ -1890,7 +2074,7 @@ class MASEnvironment:
         # =====================================================
 
         self.log_memory_write(
-            agent_name="executor",
+            agent_name=agent_name,
 
             content=(
                 f"Execution assignment:\n"
@@ -1915,8 +2099,8 @@ class MASEnvironment:
         # =====================================================
 
         self.publish_agent_result(
-            sender="executor",
-            receiver="coordinator",
+            sender=agent_name,
+            receiver=next_agent,
             content=execution_result,
             metadata={
                 "stage":
@@ -1951,10 +2135,9 @@ class MASEnvironment:
 
         execution = self.receive_agent_message(
             receiver="coordinator",
-            expected_sender=(
-                "researcher"
-                if self.topology_name == "layered"
-                else "executor"
+            expected_sender=self._delivery_sender(
+                "executor-2",
+                "coordinator"
             )
         )
 
@@ -2155,18 +2338,50 @@ class MASEnvironment:
         )
 
         workflow.add_node(
-            "researcher",
+            "planner",
+            self.planner_node
+        )
+
+        workflow.add_node(
+            "researcher-1",
             self.research_node
         )
 
         workflow.add_node(
-            "analyst",
+            "researcher-2",
+            lambda state: self.research_node(
+                state,
+                agent_name="researcher-2",
+                next_agent="analyst-1"
+            )
+        )
+
+        workflow.add_node(
+            "analyst-1",
             self.analysis_node
         )
 
         workflow.add_node(
-            "executor",
+            "analyst-2",
+            lambda state: self.analysis_node(
+                state,
+                agent_name="analyst-2",
+                next_agent="executor-1"
+            )
+        )
+
+        workflow.add_node(
+            "executor-1",
             self.execution_node
+        )
+
+        workflow.add_node(
+            "executor-2",
+            lambda state: self.execution_node(
+                state,
+                agent_name="executor-2",
+                next_agent="coordinator"
+            )
         )
 
         workflow.add_node(
@@ -2190,21 +2405,41 @@ class MASEnvironment:
 
         workflow.add_edge(
             "coordinator",
-            "researcher"
+            "planner"
         )
 
         workflow.add_edge(
-            "researcher",
-            "analyst"
+            "planner",
+            "researcher-1"
         )
 
         workflow.add_edge(
-            "analyst",
-            "executor"
+            "researcher-1",
+            "researcher-2"
         )
 
         workflow.add_edge(
-            "executor",
+            "researcher-2",
+            "analyst-1"
+        )
+
+        workflow.add_edge(
+            "analyst-1",
+            "analyst-2"
+        )
+
+        workflow.add_edge(
+            "analyst-2",
+            "executor-1"
+        )
+
+        workflow.add_edge(
+            "executor-1",
+            "executor-2"
+        )
+
+        workflow.add_edge(
+            "executor-2",
             "final"
         )
 
@@ -2247,74 +2482,32 @@ class MASEnvironment:
                 metadata=metadata
             )
 
-        elif self.topology_name == "centralized":
-
-            # Sender sends result to Coordinator.
-            if sender != "coordinator":
-                self.send_message(
-                    sender=sender,
-                    receiver="coordinator",
-                    content=content,
-                    metadata=metadata
-                )
-
-            # Coordinator forwards the information to the destination agent.
-            if receiver != "coordinator":
-                self.send_message(
-                    sender="coordinator",
-                    receiver=receiver,
-                    content=content,
-                    metadata=metadata
-                )
-
-            return content
-
-        elif self.topology_name == "layered":
-
-            if self.topology.can_communicate(
-                sender,
-                receiver
-            ):
-                return self.send_message(
-                    sender=sender,
-                    receiver=receiver,
-                    content=content,
-                    metadata=metadata
-                )
-
+        try:
             path = nx.shortest_path(
                 self.topology.get_graph(),
                 sender,
                 receiver
             )
+        except nx.NetworkXNoPath as exc:
+            raise ValueError(
+                f"Communication not allowed under {self.topology_name}: "
+                f"{sender} -> {receiver}"
+            ) from exc
 
-            for current, next_agent in zip(
-                path,
-                path[1:]
-            ):
-                self.send_message(
-                    sender=current,
-                    receiver=next_agent,
-                    content=content,
-                    metadata=metadata
-                )
-
-                if next_agent != receiver:
-                    content = self.receive_agent_message(
-                        receiver=next_agent,
-                        expected_sender=current
-                    )
-
-            return content
-
-        else:
-            # Decentralized
-            return self.send_message(
-                sender=sender,
-                receiver=receiver,
+        for current, next_agent in zip(path, path[1:]):
+            self.send_message(
+                sender=current,
+                receiver=next_agent,
                 content=content,
                 metadata=metadata
             )
+            if next_agent != receiver:
+                content = self.receive_agent_message(
+                    receiver=next_agent,
+                    expected_sender=current
+                )
+
+        return content
     # =========================================================
     # EXECUTE TASK
     # =========================================================
