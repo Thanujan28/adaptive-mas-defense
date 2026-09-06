@@ -218,7 +218,7 @@ class CommunicationTopology:
     @staticmethod
     def fully_connected(agents: List[str]):
         """
-        Decentralized peer-to-peer topology.
+        fully_connected_p2p peer-to-peer topology.
 
         Every agent can communicate directly
         with every other agent.
@@ -241,7 +241,7 @@ class CommunicationTopology:
         return topology
 
     @staticmethod
-    def decentralized(agents: List[str]):
+    def fully_connected_p2p(agents: List[str]):
         """Compatibility alias for the fully connected peer-to-peer topology."""
         return CommunicationTopology.fully_connected(agents)
 
@@ -307,8 +307,12 @@ class CommunicationTopology:
         Shared-pool communication configuration.
 
         Agents do not communicate directly with one another.
-        Communication is performed through the shared pool,
-        which is infrastructure external to the agent topology.
+        Communication is performed through the shared pool.
+
+        The pool is represented as an infrastructure node in the
+        formal graph so the topology can be inspected and analyzed.
+        Runtime delivery still uses the environment's shared-pool
+        storage and targeted mailbox semantics.
         """
 
         topology = CommunicationTopology(
@@ -316,9 +320,12 @@ class CommunicationTopology:
             topology_name="shared_pool"
         )
 
-        # No agent-to-agent edges are added.
-        # The shared pool is infrastructure and is therefore
-        # not represented as an agent-topology node.
+        pool = "shared_pool"
+        topology.graph.add_node(pool)
+
+        for agent in agents:
+            topology.add_connection(agent, pool)
+            topology.add_connection(pool, agent)
 
         return topology
 
@@ -341,7 +348,12 @@ class CommunicationTopology:
         if name == "layered":
             return CommunicationTopology.layered(agents)
 
-        if name in ("fully_connected", "peer_to_peer", "decentralized"):
+        if name in (
+            "fully_connected",
+            "peer_to_peer",
+            "fully_connected_p2p",
+            "fully_connect_p2p",
+        ):
             return CommunicationTopology.fully_connected(agents)
 
         if name == "centralized":
@@ -352,7 +364,7 @@ class CommunicationTopology:
 
         raise ValueError(
             f"Unknown topology: {name}. "
-            f"Use layered, fully_connected, centralized, or shared_pool."
+            f"Use layered, fully_connected_p2p, centralized, or shared_pool."
         )
 
         

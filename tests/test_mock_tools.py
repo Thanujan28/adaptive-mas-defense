@@ -1,7 +1,11 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from environment.mas_environment import MASEnvironment
 from tools.mock_email import MockEmailTool
+from tools.mock_calendar import MockCalendarTool
 from tools.tool_manager import ToolManager
 
 
@@ -43,34 +47,25 @@ class _FakeMailHog:
 class MockToolTests(unittest.TestCase):
 
     def test_calendar_operations_are_deterministic(self):
-        manager = ToolManager()
-        event = manager.execute(
-            "coordinator",
-            "mock_calendar",
-            {
-                "operation": "create",
-                "title": "Research review",
-                "start": "2026-09-07T09:00:00Z",
-            },
-        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database_path = Path(temporary_directory) / "calendar.json"
+            calendar = MockCalendarTool(str(database_path))
+            event = calendar.create_event(
+                title="Research review",
+                start="2026-09-07T09:00:00Z",
+            )
 
-        self.assertEqual(event["id"], "event-0001")
-        self.assertEqual(
-            manager.execute(
-                "coordinator",
-                "mock_calendar",
-                {"operation": "list"},
-            ),
-            [event],
-        )
-        self.assertEqual(
-            manager.execute(
-                "coordinator",
-                "mock_calendar",
-                {"operation": "delete", "event_id": "event-0001"},
-            ),
-            {"status": "deleted", "id": "event-0001"},
-        )
+            self.assertEqual(event["id"], "event-0001")
+            with database_path.open("r", encoding="utf-8") as database:
+                stored_data = json.load(database)
+            self.assertEqual(stored_data["events"], [event])
+
+            reloaded_calendar = MockCalendarTool(str(database_path))
+            self.assertEqual(reloaded_calendar.list_events(), [event])
+            self.assertEqual(
+                reloaded_calendar.delete_event("event-0001"),
+                {"status": "deleted", "id": "event-0001"},
+            )
 
     def test_email_uses_mailhog_api(self):
         fake_mailhog = _FakeMailHog()

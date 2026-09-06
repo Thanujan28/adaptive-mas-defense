@@ -57,8 +57,8 @@ class ToolAuthorizationTests(unittest.TestCase):
 				{"query": "security"}
 			)
 
-	def test_decentralized_researcher_can_search(self):
-		self.manager.set_topology("decentralized")
+	def test_fully_connected_p2p_researcher_can_search(self):
+		self.manager.set_topology("fully_connected_p2p")
 		self.manager.tools["internet_search"] = _EmptySearchTool()
 		self.assertEqual(
 			self.manager.execute(
@@ -69,8 +69,8 @@ class ToolAuthorizationTests(unittest.TestCase):
 			[]
 		)
 
-	def test_decentralized_analyst_can_search(self):
-		self.manager.set_topology("decentralized")
+	def test_fully_connected_p2p_analyst_can_search(self):
+		self.manager.set_topology("fully_connected_p2p")
 		self.manager.tools["academic_search"] = _EmptySearchTool()
 		self.assertEqual(
 			self.manager.execute(
@@ -126,7 +126,7 @@ class ToolAuthorizationTests(unittest.TestCase):
 					"internet_search": False,
 				},
 			},
-			"decentralized": {
+			"fully_connected_p2p": {
 				"coordinator": {
 					"internet_search": True,
 					"academic_search": True,
@@ -303,7 +303,7 @@ class ToolAuthorizationTests(unittest.TestCase):
 		for topology_name in (
 			"layered",
 			"centralized",
-			"decentralized",
+			"fully_connected_p2p",
 			"shared_pool",
 		):
 			with self.subTest(topology=topology_name):
@@ -418,7 +418,7 @@ class TopologyTests(unittest.TestCase):
 		expected_sizes = {
 			"layered": (4, 6),
 			"centralized": (4, 6),
-			"decentralized": (4, 12),
+			"fully_connected_p2p": (4, 12),
 			"shared_pool": (5, 8),
 		}
 

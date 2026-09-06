@@ -81,7 +81,7 @@ class MASEnvironment:
 
         1. Layered
         2. Centralized
-        3. Decentralized
+        3. fully_connected_p2p
         4. Shared Pool
 
 
@@ -107,7 +107,7 @@ class MASEnvironment:
         Researcher Analyst Executor
 
 
-    Decentralized:
+    fully_connected_p2p:
 
         Any agent <-> Any other agent
 
@@ -129,7 +129,7 @@ class MASEnvironment:
                 ↓
             Tool Control Plane
 
-        Layered, decentralized, shared_pool:
+        Layered, fully_connected_p2p, shared_pool:
             Agent
                 ↓
             Tool Control Plane
@@ -1511,7 +1511,7 @@ class MASEnvironment:
                 Coordinator -> Researcher
                 Researcher -> Coordinator -> Analyst
 
-            Decentralized:
+            fully_connected_p2p:
                 Coordinator -> Researcher
                 Researcher -> Analyst
 

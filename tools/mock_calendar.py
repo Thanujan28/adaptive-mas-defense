@@ -1,12 +1,16 @@
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 class MockCalendarTool:
-    """Deterministic in-memory calendar used by MAS experiments."""
+    """Deterministic JSON-backed calendar used by MAS experiments."""
 
-    def __init__(self):
+    def __init__(self, database_path: str = "configs/mock_calendar.json"):
+        self.database_path = Path(database_path)
         self._events: Dict[str, Dict[str, Any]] = {}
         self._next_id = 1
+        self._load()
 
     def create_event(
         self,
@@ -32,6 +36,7 @@ class MockCalendarTool:
             "location": str(location).strip(),
         }
         self._events[event_id] = event
+        self._save()
         return dict(event)
 
     def list_events(self) -> List[Dict[str, Any]]:
@@ -51,4 +56,44 @@ class MockCalendarTool:
         if normalized_id not in self._events:
             raise KeyError(f"Calendar event not found: {event_id}")
         del self._events[normalized_id]
+        self._save()
         return {"status": "deleted", "id": normalized_id}
+
+    def _load(self):
+        if not self.database_path.exists():
+            self._save()
+            return
+
+        try:
+            with self.database_path.open("r", encoding="utf-8") as database:
+                data = json.load(database)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Calendar database could not be read: {self.database_path}"
+            ) from exc
+
+        events = data.get("events", []) if isinstance(data, dict) else []
+        if not isinstance(events, list):
+            raise ValueError("Calendar database events must be a list.")
+
+        self._events = {
+            event["id"]: dict(event)
+            for event in events
+            if isinstance(event, dict) and event.get("id")
+        }
+        stored_next_id = data.get("next_id", 1) if isinstance(data, dict) else 1
+        self._next_id = max(1, int(stored_next_id))
+
+    def _save(self):
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "next_id": self._next_id,
+            "events": self.list_events(),
+        }
+        temporary_path = self.database_path.with_suffix(
+            self.database_path.suffix + ".tmp"
+        )
+        with temporary_path.open("w", encoding="utf-8") as database:
+            json.dump(data, database, indent=2, sort_keys=True)
+            database.write("\n")
+        temporary_path.replace(self.database_path)
