@@ -213,13 +213,20 @@ class MockToolTests(unittest.TestCase):
                         "tool_request",
                         "tool_forward",
                         "tool_execution",
+                        "tool_usage",
                         "tool_result",
                         "tool_result_delivery",
                     ],
                 )
-                request_ids = {event["request_id"] for event in tool_events}
+                request_ids = {
+                    event["request_id"]
+                    for event in tool_events
+                    if event["event_type"] != "tool_usage"
+                }
                 self.assertEqual(len(request_ids), 1)
                 for event in tool_events:
+                    if event["event_type"] == "tool_usage":
+                        continue
                     self.assertEqual(
                         event["metadata"]["requesting_agent"],
                         requesting_agent,

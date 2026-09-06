@@ -11,4 +11,5 @@ def get_llm():
         num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "4096")),
         num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "0")) or None,
         keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", "5m"),
+        top_p=1.0
     )

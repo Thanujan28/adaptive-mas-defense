@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 import copy
+from pathlib import Path
 from typing import Any, Callable, Optional
+
+import yaml
 
 
 @dataclass
@@ -8,6 +11,8 @@ class ResourceBudget:
     token_limit: int = 200_000
     tool_limit: int = 50
     tool_timeout_seconds: float = 30.0
+    tool_result_tokens: int = 2_000
+    memory_capacity: int = 100
     tokens_used: int = 0
     tools_used: int = 0
     timed_out_tools: int = 0
@@ -20,6 +25,8 @@ class ResourceBudget:
         return amount
 
     def record_tool(self) -> int:
+        if self.tools_used >= self.tool_limit:
+            raise RuntimeError("Tool invocation budget exhausted.")
         self.tools_used += 1
         return self.tools_used
 
@@ -41,6 +48,8 @@ class ResourceBudget:
             "token_budget_remaining": self.token_budget_remaining,
             "tool_budget_remaining": self.tool_budget_remaining,
             "tool_timeout_seconds": self.tool_timeout_seconds,
+            "tool_result_tokens": self.tool_result_tokens,
+            "memory_capacity": self.memory_capacity,
         }
 
     def reset(self):
@@ -66,6 +75,19 @@ def response_token_count(response: Any) -> int:
     return len(content.split())
 
 
+def load_resource_budget(config_path: str = "configs/config.yaml") -> ResourceBudget:
+    with Path(config_path).open("r", encoding="utf-8") as config_file:
+        config = yaml.safe_load(config_file) or {}
+    values = config.get("budgets", {})
+    return ResourceBudget(
+        token_limit=int(values.get("token_limit", 200_000)),
+        tool_limit=int(values.get("tool_limit", 50)),
+        tool_timeout_seconds=float(values.get("tool_timeout_seconds", 30)),
+        tool_result_tokens=int(values.get("tool_result_tokens", 2_000)),
+        memory_capacity=int(values.get("memory_capacity", 100)),
+    )
+
+
 class TrackedLLM:
     def __init__(
         self,
@@ -80,10 +102,24 @@ class TrackedLLM:
         self._event_callback = event_callback
 
     def invoke(self, prompt: str, *args, **kwargs):
+        if self._budget.token_budget_remaining <= 0:
+            if self._event_callback is not None:
+                self._event_callback(
+                    self._agent_name, 0, "llm_rejected", "token_budget_exhausted"
+                )
+            raise RuntimeError("LLM token budget exhausted before invocation.")
         response = self._llm.invoke(prompt, *args, **kwargs)
-        tokens = self._budget.record_tokens(response_token_count(response))
+        tokens = response_token_count(response)
+        try:
+            self._budget.record_tokens(tokens)
+        except RuntimeError:
+            if self._event_callback is not None:
+                self._event_callback(
+                    self._agent_name, tokens, "llm_rejected", "token_budget_exhausted"
+                )
+            raise
         if self._event_callback is not None:
-            self._event_callback(self._agent_name, tokens)
+            self._event_callback(self._agent_name, tokens, "llm_usage", "consumed")
         return response
 
     def __getattr__(self, name):
@@ -92,14 +128,21 @@ class TrackedLLM:
 
 def truncate_tool_result(result: Any, max_tokens: int = 2_000) -> Any:
     """Truncate textual tool output before it enters an agent prompt."""
-    if isinstance(result, str):
-        return " ".join(result.split()[:max_tokens])
-    if isinstance(result, dict):
-        truncated = copy.deepcopy(result)
-        for key, value in truncated.items():
-            if isinstance(value, str):
-                truncated[key] = " ".join(value.split()[:max_tokens])
-        return truncated
-    if isinstance(result, list):
-        return [truncate_tool_result(item, max_tokens) for item in result]
-    return result
+    remaining = [max(0, int(max_tokens))]
+
+    def truncate(value):
+        if isinstance(value, str):
+            words = value.split()
+            selected = words[:remaining[0]]
+            remaining[0] -= len(selected)
+            return " ".join(selected)
+        if isinstance(value, dict):
+            return {
+                key: truncate(item)
+                for key, item in copy.deepcopy(value).items()
+            }
+        if isinstance(value, list):
+            return [truncate(item) for item in value]
+        return value
+
+    return truncate(result)

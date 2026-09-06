@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 
 from tools.internet_search import InternetSearchTool
 from tools.academic_search import AcademicSearchTool
@@ -7,15 +7,52 @@ from tools.source_collector import SourceCollector
 from tools.report_writer import ReportWriterTool
 from tools.mock_calendar import MockCalendarTool
 from tools.mock_email import MockEmailTool
+from environment.resource_accounting import ResourceBudget
 
 
 class ToolManager:
 
-    def __init__(self, tool_limit: int = 50, tool_timeout_seconds: float = 30.0):
-        self.tool_limit = tool_limit
-        self.tool_timeout_seconds = tool_timeout_seconds
-        self.tools_used = 0
+    def __init__(
+        self,
+        tool_limit: int = 50,
+        tool_timeout_seconds: float = 30.0,
+        resource_budget: Optional[ResourceBudget] = None,
+        event_callback: Optional[Callable[..., None]] = None,
+    ):
+        self.resource_budget = resource_budget or ResourceBudget(
+            tool_limit=tool_limit,
+            tool_timeout_seconds=tool_timeout_seconds,
+        )
+        self.event_callback = event_callback
+        # The registry and fixed permission matrix are initialized below.
         self.timed_out_tools = 0
+
+    @property
+    def tool_limit(self):
+        return self.resource_budget.tool_limit
+
+    @property
+    def tool_timeout_seconds(self):
+        return self.resource_budget.tool_timeout_seconds
+
+    @property
+    def tools_used(self):
+        return self.resource_budget.tools_used
+
+    @tools_used.setter
+    def tools_used(self, value):
+        self.resource_budget.tools_used = int(value)
+
+    @property
+    def timed_out_tools(self):
+        return self.resource_budget.timed_out_tools
+
+    @timed_out_tools.setter
+    def timed_out_tools(self, value):
+        if getattr(self, "_registry_initialized", False):
+            self.resource_budget.timed_out_tools = int(value)
+            return
+        self.resource_budget.timed_out_tools = int(value)
 
         # =====================================================
         # AVAILABLE TOOLS
@@ -150,6 +187,7 @@ class ToolManager:
         }
 
         self.current_topology = None
+        self._registry_initialized = True
 
     # =========================================================
     # TOPOLOGY
@@ -186,10 +224,16 @@ class ToolManager:
         tool_name: str,
         arguments: Dict[str, Any]
     ):
-        if self.tools_used >= self.tool_limit:
-            raise RuntimeError("Tool invocation budget exhausted.")
-
-        self.tools_used += 1
+        try:
+            invocation_number = self.resource_budget.record_tool()
+        except RuntimeError:
+            self._resource_event(
+                "tool_rejected", tool_name, "tool_budget_exhausted"
+            )
+            raise
+        self._resource_event(
+            "tool_usage", tool_name, "consumed", invocation_number
+        )
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(
             self._execute,
@@ -200,7 +244,8 @@ class ToolManager:
         try:
             return future.result(timeout=self.tool_timeout_seconds)
         except TimeoutError as exc:
-            self.timed_out_tools += 1
+            self.resource_budget.timed_out_tools += 1
+            self._resource_event("tool_timeout", tool_name, "timeout")
             future.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
             raise TimeoutError(
@@ -209,6 +254,10 @@ class ToolManager:
         finally:
             if not future.running():
                 executor.shutdown(wait=False, cancel_futures=True)
+
+    def _resource_event(self, event_type, tool_name, status, count=None):
+        if self.event_callback is not None:
+            self.event_callback(event_type, tool_name, status, count)
 
     def _execute(
         self,

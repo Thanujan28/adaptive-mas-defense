@@ -22,6 +22,7 @@ from environment.resource_accounting import (
     ResourceBudget,
     TrackedLLM,
     truncate_tool_result,
+    load_resource_budget,
 )
 
 
@@ -145,7 +146,8 @@ class MASEnvironment:
 
     def __init__(
         self,
-        topology_name="centralized"
+        topology_name="centralized",
+        config_path="configs/config.yaml",
     ):
 
         # =====================================================
@@ -172,19 +174,19 @@ class MASEnvironment:
         # MEMORY SYSTEM
         # =====================================================
 
+        self.resource_budget = load_resource_budget(config_path)
         self.memory = MemoryManager(
-            self.agent_names
+            self.agent_names,
+            capacity=self.resource_budget.memory_capacity,
         )
-
-        self.resource_budget = ResourceBudget()
 
         # =====================================================
         # TOOL SYSTEM
         # =====================================================
 
         self.tool_manager = ToolManager(
-            tool_limit=self.resource_budget.tool_limit,
-            tool_timeout_seconds=self.resource_budget.tool_timeout_seconds,
+            resource_budget=self.resource_budget,
+            event_callback=self._record_tool_resource_event,
         )
         self.tool_control_plane = ToolControlPlane(
             self.tool_manager
@@ -415,10 +417,16 @@ class MASEnvironment:
             )
         )
 
-    def _record_llm_usage(self, agent_name: str, token_usage: int):
+    def _record_llm_usage(
+        self,
+        agent_name: str,
+        token_usage: int,
+        event_type: str = "llm_usage",
+        status: str = "consumed",
+    ):
         self.log_event(
             MASEvent.create(
-                event_type="llm_usage",
+                event_type=event_type,
                 sender=agent_name,
                 token_usage=token_usage,
                 metadata={
@@ -426,6 +434,30 @@ class MASEnvironment:
                     "topology": self.topology_name,
                     "tokens_used": self.resource_budget.tokens_used,
                     "token_limit": self.resource_budget.token_limit,
+                    "status": status,
+                },
+            )
+        )
+
+    def _record_tool_resource_event(
+        self,
+        event_type: str,
+        tool_name: str,
+        status: str,
+        count=None,
+    ):
+        self.log_event(
+            MASEvent.create(
+                event_type=event_type,
+                sender="tool_control_plane",
+                receiver=tool_name,
+                tool_call=tool_name,
+                metadata={
+                    "topology": self.topology_name,
+                    "status": status,
+                    "tools_used": self.resource_budget.tools_used,
+                    "tool_limit": self.resource_budget.tool_limit,
+                    "count": count,
                 },
             )
         )
@@ -1696,13 +1728,21 @@ class MASEnvironment:
             if isinstance(result, list):
 
                 tool_results.extend(
-                    truncate_tool_result(item)
+                    truncate_tool_result(
+                        item,
+                        self.resource_budget.tool_result_tokens,
+                    )
                     for item in result
                 )
 
             else:
 
-                tool_results.append(truncate_tool_result(result))
+                tool_results.append(
+                    truncate_tool_result(
+                        result,
+                        self.resource_budget.tool_result_tokens,
+                    )
+                )
 
         # =====================================================
         # RESEARCHER EXECUTION
@@ -1920,13 +1960,21 @@ class MASEnvironment:
             if isinstance(result, list):
 
                 tool_results.extend(
-                    truncate_tool_result(item)
+                    truncate_tool_result(
+                        item,
+                        self.resource_budget.tool_result_tokens,
+                    )
                     for item in result
                 )
 
             else:
 
-                tool_results.append(truncate_tool_result(result))
+                tool_results.append(
+                    truncate_tool_result(
+                        result,
+                        self.resource_budget.tool_result_tokens,
+                    )
+                )
 
         # =====================================================
         # ANALYST RUN
@@ -2120,11 +2168,19 @@ class MASEnvironment:
 
             if isinstance(result, list):
                 tool_results.extend(
-                    truncate_tool_result(item)
+                    truncate_tool_result(
+                        item,
+                        self.resource_budget.tool_result_tokens,
+                    )
                     for item in result
                 )
             else:
-                tool_results.append(truncate_tool_result(result))
+                tool_results.append(
+                    truncate_tool_result(
+                        result,
+                        self.resource_budget.tool_result_tokens,
+                    )
+                )
 
         # =====================================================
         # EXECUTOR RUN
@@ -2649,6 +2705,16 @@ class MASEnvironment:
         # =====================================================
 
         self.events = []
+        self.log_event(
+            MASEvent.create(
+                event_type="resource_reset",
+                sender="environment",
+                metadata={
+                    "topology": self.topology_name,
+                    **self.resource_budget.as_dict(),
+                },
+            )
+        )
 
         # =====================================================
         # CLEAR SHARED POOL

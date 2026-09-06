@@ -44,8 +44,9 @@ class AgentMemory:
 
     CAPACITY = 100
 
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str, capacity: int = 100):
         self.agent_name = agent_name
+        self.capacity = max(1, int(capacity))
         self.memories: List[MemoryRecord] = []
 
     # =========================================================
@@ -75,7 +76,7 @@ class AgentMemory:
 
         self.memories.append(memory)
 
-        if len(self.memories) > self.CAPACITY:
+        if len(self.memories) > self.capacity:
             eviction_index = min(
                 range(len(self.memories)),
                 key=lambda index: (
@@ -149,10 +150,10 @@ class MemoryManager:
     Manages independent memory stores for all MAS agents.
     """
 
-    def __init__(self, agent_names: List[str]):
+    def __init__(self, agent_names: List[str], capacity: int = AgentMemory.CAPACITY):
 
         self.memories: Dict[str, AgentMemory] = {
-            agent_name: AgentMemory(agent_name)
+            agent_name: AgentMemory(agent_name, capacity=capacity)
             for agent_name in agent_names
         }
 
