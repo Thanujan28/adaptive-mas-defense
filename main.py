@@ -30,12 +30,9 @@ def main():
         target_agent="planner",
     )
 
-    injection = attack.create_injection(
-        task_id="001"
-    )
+    injection = attack.create_injection()
 
     print("\nPrompt Infection injected into: planner")
-    print("Infection ID:", injection["metadata"]["infection_id"])
 
     # ---------------------------------------------------------
     # EXECUTE MAS WITH ATTACK

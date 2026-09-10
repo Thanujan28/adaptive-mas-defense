@@ -1810,6 +1810,8 @@ class MASEnvironment:
             coordinator_plan
         )
 
+        print(plan)
+
         # =====================================================
         # PROPAGATE ATTACK CONTENT
         # =====================================================
@@ -2107,6 +2109,8 @@ class MASEnvironment:
             research_instruction,
             tool_results=tool_results
         )
+
+        print(f"\n{agent_name} research result:\n{research_result}")
 
         # =====================================================
         # LOG RESEARCH RESULT

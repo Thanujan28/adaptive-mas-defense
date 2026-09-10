@@ -7,7 +7,7 @@ def apply_attack(
     environment: Any,
     attack_condition: str,
     task_id: str,
-    target_agent: str = "planner",
+    target_agent: str = "researcher-1",
 ):
     """
     Apply the selected controlled attack scenario.
