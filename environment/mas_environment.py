@@ -2110,8 +2110,6 @@ class MASEnvironment:
             tool_results=tool_results
         )
 
-        print(f"\n{agent_name} research result:\n{research_result}")
-
         # =====================================================
         # LOG RESEARCH RESULT
         # =====================================================
