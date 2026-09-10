@@ -919,6 +919,7 @@ ANALYSIS RULES
 
 Return a structured analysis.
 """
+        print("Analyst prompt : ",prompt)
 
         response = self.llm.invoke(
             prompt
