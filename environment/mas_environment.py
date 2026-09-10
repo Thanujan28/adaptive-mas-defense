@@ -3046,7 +3046,8 @@ class MASEnvironment:
 
     def execute_task(
         self,
-        task: str
+        task: str,
+        attack_injections=None,
     ):
         # Every execute_task call is an independent episode.
         self.episode_state.reset(
@@ -3080,6 +3081,68 @@ class MASEnvironment:
 
         self.shared_pool = self.episode_state.shared_pool
         self.episode_state.task = task
+
+                # =====================================================
+        # ATTACK INJECTION
+        #
+        # Inject controlled adversarial content after the
+        # episode reset and before LangGraph execution.
+        # =====================================================
+
+        for injection in attack_injections or []:
+
+            self.inject_external_message(
+                receiver=injection["receiver"],
+                content=injection["content"],
+                metadata=injection.get(
+                    "metadata",
+                    {}
+                ),
+            )
+
+            self.record_security_event(
+                event_type="attack",
+                sender="attack_simulator",
+                receiver=injection["receiver"],
+                metadata={
+                    "attack_type":
+                        injection.get(
+                            "metadata",
+                            {}
+                        ).get(
+                            "attack_type"
+                        ),
+
+                    "infection_id":
+                        injection.get(
+                            "metadata",
+                            {}
+                        ).get(
+                            "infection_id"
+                        ),
+
+                    "infection_hop":
+                        injection.get(
+                            "metadata",
+                            {}
+                        ).get(
+                            "infection_hop",
+                            0
+                        ),
+
+                    "target_agent":
+                        injection["receiver"],
+
+                    "synthetic_payload":
+                        injection.get(
+                            "metadata",
+                            {}
+                        ).get(
+                            "synthetic_payload",
+                            True
+                        ),
+                },
+            )
 
         # =====================================================
         # INITIAL LANGGRAPH STATE

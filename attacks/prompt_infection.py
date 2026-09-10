@@ -84,3 +84,20 @@ TEST_DATA = SYNTHETIC
         )
 
         return message
+
+    def create_injection(self, task_id: str) -> Dict[str, Any]:
+
+        infection_id = f"PI-{task_id}"
+
+        return {
+            "receiver": self.target_agent,
+            "content": self.build_payload(task_id),
+            "metadata": {
+                "attack_type": self.ATTACK_TYPE,
+                "infection_id": infection_id,
+                "infection_stage": "initial_injection",
+                "infection_hop": 0,
+                "self_replication": True,
+                "synthetic_payload": True,
+            },
+        }

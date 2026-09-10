@@ -1,5 +1,5 @@
 from environment.mas_environment import MASEnvironment
-from attacks.scenarios import apply_attack
+from attacks.prompt_infection import PromptInfectionAttack
 
 
 def main():
@@ -21,71 +21,41 @@ def main():
         print("Error: Task cannot be empty.")
         return
 
-    print("\nAttack condition:")
-    print("1. clean")
-    print("2. prompt_infection")
-
-    choice = input("\nSelect attack: ").strip()
-
-    if choice == "1":
-        attack_condition = "clean"
-
-    elif choice == "2":
-        attack_condition = "prompt_infection"
-
-    else:
-        print("Invalid attack selection.")
-        return
-
-    target_agent = input(
-        "\nTarget agent [planner]: "
-    ).strip()
-
-    if not target_agent:
-        target_agent = "planner"
-
-    if target_agent not in environment.agent_names:
-        print(
-            f"Invalid target agent: {target_agent}"
-        )
-        return
-
-    task_id = "manual-test-001"
-
     # ---------------------------------------------------------
-    # ATTACK INJECTION
+    # CREATE PROMPT INFECTION ATTACK
     # ---------------------------------------------------------
 
-    if attack_condition == "prompt_infection":
+    attack = PromptInfectionAttack(
+        environment=environment,
+        target_agent="planner",
+    )
 
-        print("\nInjecting Prompt Infection...")
-        print(
-            f"Target: {target_agent}"
-        )
+    injection = attack.create_injection(
+        task_id="001"
+    )
 
-        apply_attack(
-            environment=environment,
-            attack_condition=attack_condition,
-            task_id=task_id,
-            target_agent=target_agent,
-        )
-
-        print("\nPrompt Infection injected.")
+    print("\nPrompt Infection injected into: planner")
+    print("Infection ID:", injection["metadata"]["infection_id"])
 
     # ---------------------------------------------------------
-    # NORMAL MAS EXECUTION
+    # EXECUTE MAS WITH ATTACK
     # ---------------------------------------------------------
 
     print("\nExecuting task...")
     print("-" * 60)
 
-    result = environment.execute_task(task)
+    result = environment.execute_task(
+        task=task,
+        attack_injections=[
+            injection
+        ],
+    )
 
     print("\nFinal result:")
     print(result)
 
     # ---------------------------------------------------------
-    # EVENTS
+    # SHOW EVENTS
     # ---------------------------------------------------------
 
     print("\nRecorded MAS events:")
