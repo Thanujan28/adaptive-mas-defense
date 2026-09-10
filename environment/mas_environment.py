@@ -820,7 +820,119 @@ class MASEnvironment:
         return None
 
 
+    def receive_external_message(
+        self,
+        receiver: str,
+    ):
+        """
+        Retrieve externally injected content intended for the
+        specified victim agent.
 
+        Only messages explicitly marked as external injections
+        are returned.
+        """
+
+        if receiver not in self.agent_names:
+            raise ValueError(
+                f"Unknown receiver: {receiver}"
+            )
+
+        # =====================================================
+        # SHARED POOL
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            for index, message in enumerate(
+                self.shared_pool
+            ):
+
+                if (
+                    message["receiver"] == receiver
+                    and message["sender"]
+                        == "external_source"
+                    and message.get("metadata", {}).get(
+                        "external_injection",
+                        False
+                    )
+                ):
+
+                    message = self.shared_pool.pop(index)
+
+                    self.log_event(
+                        MASEvent.create(
+                            event_type="external_message_receive",
+                            sender="external_source",
+                            receiver=receiver,
+                            content=(
+                                f"{receiver} consumed "
+                                f"external content"
+                            ),
+                            metadata={
+                                "message_id":
+                                    message["message_id"],
+                                "topology":
+                                    self.topology_name,
+                                "external_injection":
+                                    True,
+                                **message.get(
+                                    "metadata",
+                                    {}
+                                ),
+                            },
+                        )
+                    )
+
+                    return message
+
+            return None
+
+        # =====================================================
+        # NORMAL TOPOLOGIES
+        # =====================================================
+
+        mailbox = self.agent_mailboxes[receiver]
+
+        for index, message in enumerate(mailbox):
+
+            if (
+                message["sender"]
+                == "external_source"
+                and message.get("metadata", {}).get(
+                    "external_injection",
+                    False
+                )
+            ):
+
+                message = mailbox.pop(index)
+
+                self.log_event(
+                    MASEvent.create(
+                        event_type="external_message_receive",
+                        sender="external_source",
+                        receiver=receiver,
+                        content=(
+                            f"{receiver} consumed "
+                            f"external content"
+                        ),
+                        metadata={
+                            "message_id":
+                                message["message_id"],
+                            "topology":
+                                self.topology_name,
+                            "external_injection":
+                                True,
+                            **message.get(
+                                "metadata",
+                                {}
+                            ),
+                        },
+                    )
+                )
+
+                return message
+
+        return None
     
 
     # =========================================================
@@ -1606,24 +1718,189 @@ class MASEnvironment:
     # =========================================================
 
     def planner_node(self, state: MASState):
+        """
+        Execute the Planner stage.
+
+        The Planner first consumes the legitimate Coordinator
+        plan. If externally injected adversarial content exists,
+        it is consumed separately and attached to the Planner's
+        downstream assignment.
+
+        The Planner itself is deterministic; therefore the
+        Prompt Infection is not interpreted as a Planner LLM
+        instruction. Instead, the Planner acts as the
+        propagation point into the next LLM agent.
+        """
+
+        # =====================================================
+        # RECEIVE COORDINATOR PLAN
+        # =====================================================
+
         coordinator_plan = self.receive_agent_message(
             receiver="planner",
             expected_sender="coordinator"
         )
+
         if coordinator_plan is None:
-            raise ValueError("Planner received no Coordinator plan.")
+            raise ValueError(
+                "Planner received no Coordinator plan."
+            )
+
+        # =====================================================
+        # RECEIVE EXTERNAL ATTACK CONTENT
+        # =====================================================
+
+        external_message = self.receive_external_message(
+            receiver="planner"
+        )
+
+        infection_content = None
+        infection_metadata = {}
+
+        if external_message is not None:
+
+            infection_content = external_message["content"]
+
+            infection_metadata = (
+                external_message.get(
+                    "metadata",
+                    {}
+                )
+            )
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="attack_consumed",
+                    sender="external_source",
+                    receiver="planner",
+                    content=(
+                        "Planner consumed externally "
+                        "injected Prompt Infection"
+                    ),
+                    metadata={
+                        "attack_type":
+                            infection_metadata.get(
+                                "attack_type"
+                            ),
+                        "infection_id":
+                            infection_metadata.get(
+                                "infection_id"
+                            ),
+                        "infection_hop":
+                            infection_metadata.get(
+                                "infection_hop",
+                                0
+                            ),
+                        "message_id":
+                            external_message[
+                                "message_id"
+                            ],
+                        "topology":
+                            self.topology_name,
+                    },
+                )
+            )
+
+        # =====================================================
+        # CREATE NORMAL EXECUTION PLAN
+        # =====================================================
 
         plan = self.planner.create_execution_plan(
             state["task"],
             coordinator_plan
         )
+
+        # =====================================================
+        # PROPAGATE ATTACK CONTENT
+        # =====================================================
+
+        if infection_content is not None:
+
+            plan["external_content"] = infection_content
+
+            plan["attack_metadata"] = {
+                "attack_type":
+                    infection_metadata.get(
+                        "attack_type"
+                    ),
+                "infection_id":
+                    infection_metadata.get(
+                        "infection_id"
+                    ),
+                "infection_hop":
+                    infection_metadata.get(
+                        "infection_hop",
+                        0
+                    ),
+                "self_replication":
+                    infection_metadata.get(
+                        "self_replication",
+                        False
+                    ),
+                "source":
+                    "external_source",
+            }
+
+        # =====================================================
+        # PUBLISH TO RESEARCHER-1
+        # =====================================================
+
         self.publish_agent_result(
             sender="planner",
             receiver="researcher-1",
             content=plan,
-            metadata={"stage": "research_assignment"}
+            metadata={
+                "stage": "research_assignment",
+                "contains_external_content":
+                    infection_content is not None,
+                "attack_type":
+                    infection_metadata.get(
+                        "attack_type"
+                    ),
+                "infection_id":
+                    infection_metadata.get(
+                        "infection_id"
+                    ),
+            }
         )
-        return {"plan": plan}
+
+        # =====================================================
+        # LOG PROPAGATION
+        # =====================================================
+
+        if infection_content is not None:
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="attack_propagation",
+                    sender="planner",
+                    receiver="researcher-1",
+                    content=(
+                        "Prompt Infection propagated "
+                        "from Planner to Researcher-1"
+                    ),
+                    metadata={
+                        "attack_type":
+                            infection_metadata.get(
+                                "attack_type"
+                            ),
+                        "infection_id":
+                            infection_metadata.get(
+                                "infection_id"
+                            ),
+                        "infection_hop": 1,
+                        "source_agent": "planner",
+                        "target_agent":
+                            "researcher-1",
+                        "topology":
+                            self.topology_name,
+                    },
+                )
+            )
+
+        return {
+            "plan": plan
+        }
 
     # =========================================================
     # RESEARCHER NODE
@@ -1681,6 +1958,61 @@ class MASEnvironment:
             if isinstance(research_message, dict)
             else research_message
         )
+
+        # =====================================================
+        # PROMPT INFECTION CONTENT
+        # =====================================================
+
+        external_content = None
+        attack_metadata = {}
+
+        if isinstance(research_message, dict):
+
+            external_content = research_message.get(
+                "external_content"
+            )
+
+            attack_metadata = research_message.get(
+                "attack_metadata",
+                {}
+            )
+
+        if external_content:
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="attack_received",
+                    sender="planner",
+                    receiver=agent_name,
+                    content=(
+                        f"{agent_name} received propagated "
+                        f"Prompt Infection content"
+                    ),
+                    metadata={
+                        "attack_type":
+                            attack_metadata.get(
+                                "attack_type"
+                            ),
+                        "infection_id":
+                            attack_metadata.get(
+                                "infection_id"
+                            ),
+                        "infection_hop":
+                            attack_metadata.get(
+                                "infection_hop",
+                                1
+                            ),
+                        "topology":
+                            self.topology_name,
+                    },
+                )
+            )
+
+            research_instruction = (
+                f"{research_instruction}\n\n"
+                f"EXTERNAL CONTENT:\n"
+                f"{external_content}"
+            )
         research_instruction = (
             (
                 "Perform broad discovery across the topic. Identify the main "
@@ -2844,6 +3176,107 @@ class MASEnvironment:
 
             for agent_name in self.agent_names
         }
+
+    def inject_external_message(
+        self,
+        receiver: str,
+        content: str,
+        metadata=None,
+    ):
+        """
+        Inject externally sourced content into a victim agent.
+
+        The external source is not a MAS agent and therefore does
+        not participate in the normal communication topology.
+
+        This method is intended only for controlled attack
+        simulation experiments.
+        """
+
+        if receiver not in self.agent_names:
+            raise ValueError(
+                f"Unknown receiver: {receiver}"
+            )
+
+        if content is None:
+            raise ValueError(
+                "Injected content cannot be None."
+            )
+
+        message_id = str(uuid.uuid4())
+
+        message = {
+            "message_id": message_id,
+            "sender": "external_source",
+            "receiver": receiver,
+            "content": content,
+            "topology": self.topology_name,
+            "metadata": {
+                "external_injection": True,
+                **(metadata or {}),
+            },
+        }
+
+        # =====================================================
+        # SHARED POOL
+        # =====================================================
+
+        if self.topology_name == "shared_pool":
+
+            self.shared_pool.append(message)
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="pool_write",
+                    sender="external_source",
+                    receiver="shared_pool",
+                    content=(
+                        f"External content injected "
+                        f"for {receiver}"
+                    ),
+                    metadata={
+                        "message_id": message_id,
+                        "target_agent": receiver,
+                        "topology": "shared_pool",
+                        "content_length":
+                            self._content_length(content),
+                        "external_injection": True,
+                        **(metadata or {}),
+                    },
+                )
+            )
+
+        # =====================================================
+        # NORMAL TOPOLOGIES
+        # =====================================================
+
+        else:
+
+            self.agent_mailboxes[receiver].append(message)
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="message",
+                    sender="external_source",
+                    receiver=receiver,
+                    content=(
+                        f"External content injected "
+                        f"for {receiver}"
+                    ),
+                    metadata={
+                        "message_id": message_id,
+                        "topology": self.topology_name,
+                        "content_length":
+                            self._content_length(content),
+                        "mailbox_size":
+                            len(self.agent_mailboxes[receiver]),
+                        "external_injection": True,
+                        **(metadata or {}),
+                    },
+                )
+            )
+
+        return message
 
     # =========================================================
     # CLEAR MEMORIES

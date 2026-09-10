@@ -7,7 +7,11 @@ def apply_attack(
     environment: Any,
     attack_condition: str,
     task_id: str,
+    target_agent: str = "planner",
 ):
+    """
+    Apply the selected controlled attack scenario.
+    """
 
     if attack_condition == "clean":
         return None
@@ -16,9 +20,7 @@ def apply_attack(
 
         attack = PromptInfectionAttack(
             environment=environment,
-            source_agent="coordinator",
-            target_agent="planner",
-            max_hops=3,
+            target_agent=target_agent,
         )
 
         return attack.inject(task_id)
