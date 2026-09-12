@@ -25,14 +25,16 @@ def main():
     # CREATE PROMPT INFECTION ATTACK
     # ---------------------------------------------------------
 
+    target_agent = "researcher"
+
     attack = PromptInfectionAttack(
         environment=environment,
-        target_agent="planner",
+        target_agent=target_agent,
     )
 
     injection = attack.create_injection()
 
-    print("\nPrompt Infection injected into: planner")
+    print("\nPrompt Infection injected into: ",target_agent)
 
     # ---------------------------------------------------------
     # EXECUTE MAS WITH ATTACK

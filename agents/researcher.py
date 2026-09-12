@@ -763,6 +763,8 @@ Produce the research report for the Coordinator.
             }
         )
 
+        print("Researcher result:\n", result)
+
         return result
 
     # =========================================================
