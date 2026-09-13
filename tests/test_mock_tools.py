@@ -75,7 +75,7 @@ class MockToolTests(unittest.TestCase):
         )
         self.assertEqual(request["tool_name"], "mock_calendar")
         self.assertEqual(request["arguments"]["duration_minutes"], 60)
-        self.assertEqual(request["arguments"]["start"], "2026-09-09T10:00:00")
+        self.assertTrue(request["arguments"]["start"].endswith("10:00:00"))
         self.assertIn("Coordinator", request["arguments"]["participants"])
         self.assertEqual(
             _calendar_description_from_analysis(

@@ -25,6 +25,7 @@ from environment.resource_accounting import (
     load_resource_budget,
     LlamaTokenCounter,
 )
+from attacks.prompt_infection import check_infection_indicators
 
 
 # =============================================================
@@ -449,11 +450,41 @@ class MASEnvironment:
                                 0,
                             ),
 
+                        "stage":
+                            "external_result_poisoned",
+
+                        "status":
+                            "poisoned",
+
                         "topology":
                             self.topology_name,
                     },
                 )
             )
+
+            if str(requesting_agent).startswith("researcher"):
+                self.log_event(
+                    MASEvent.create(
+                        event_type="researcher_received_poisoned_result",
+                        sender="tool_manager",
+                        receiver=requesting_agent,
+                        content=(
+                            f"Researcher received poisoned external tool "
+                            f"result from '{tool_name}' (exposure)"
+                        ),
+                        tool_call=tool_name,
+                        request_id=request_id,
+                        metadata={
+                            "agent": requesting_agent,
+                            "stage": "exposure",
+                            "status": "exposed",
+                            "compromised": False,
+                            "tool_name": tool_name,
+                            "request_id": request_id,
+                            "topology": self.topology_name,
+                        },
+                    )
+                )
 
         return processed_result
 
@@ -559,6 +590,13 @@ class MASEnvironment:
         if event_type not in {
             "attack",
             "external_result_injection",
+            "external_result_poisoned",
+            "researcher_received_poisoned_result",
+            "researcher_output_infected",
+            "analyst_received_infected_input",
+            "analyst_output_infected",
+            "executor_received_infected_input",
+            "executor_output_infected",
             "investigation",
             "containment",
             "resource_allocation",
@@ -1005,7 +1043,7 @@ class MASEnvironment:
         )
 
         authorized = (
-            self.tool_manager.is_allowed(
+            self.tool_manager.is_role_allowed(
                 requesting_agent,
                 tool_name,
             )
@@ -1098,33 +1136,6 @@ class MASEnvironment:
             != "coordinator"
         ):
 
-            self.publish_agent_result(
-                sender=requesting_agent,
-                receiver="coordinator",
-                content={
-                    "tool_name":
-                        tool_name,
-
-                    "arguments":
-                        arguments,
-                },
-                metadata={
-                    "message_type":
-                        "tool_request",
-
-                    "request_id":
-                        request_id,
-                },
-            )
-
-            routed_request = (
-                self.receive_agent_message(
-                    receiver="coordinator",
-                    expected_sender=
-                        requesting_agent,
-                )
-            )
-
             self.log_event(
                 MASEvent.create(
                     event_type="tool_forward",
@@ -1191,14 +1202,8 @@ class MASEnvironment:
             result = (
                 self.coordinator.handle_tool_request(
                     agent=requesting_agent,
-                    tool_name=
-                        routed_request[
-                            "tool_name"
-                        ],
-                    arguments=
-                        routed_request[
-                            "arguments"
-                        ],
+                    tool_name=tool_name,
+                    arguments=arguments,
                     request_id=request_id,
                 )
             )
@@ -1213,27 +1218,6 @@ class MASEnvironment:
                     requesting_agent=requesting_agent,
                     tool_name=tool_name,
                     request_id=request_id,
-                )
-            )
-
-            self.publish_agent_result(
-                sender="coordinator",
-                receiver=requesting_agent,
-                content=result,
-                metadata={
-                    "message_type":
-                        "tool_result",
-
-                    "request_id":
-                        request_id,
-                },
-            )
-
-            result = (
-                self.receive_agent_message(
-                    receiver=requesting_agent,
-                    expected_sender=
-                        "coordinator",
                 )
             )
 
@@ -1934,6 +1918,32 @@ class MASEnvironment:
             tool_results=tool_results,
         )
 
+        custom_payload = (
+            getattr(self.attack_simulator, "custom_payload", None)
+            if self.attack_simulator
+            else None
+        )
+        if check_infection_indicators(research_result, custom_payload):
+            self.log_event(
+                MASEvent.create(
+                    event_type="researcher_output_infected",
+                    sender="researcher",
+                    receiver="analyst",
+                    content=(
+                        "Researcher output contained prompt infection indicators "
+                        "(compromised / propagating to analyst)"
+                    ),
+                    metadata={
+                        "agent": "researcher",
+                        "stage": "propagation",
+                        "status": "compromised",
+                        "compromised": True,
+                        "propagated": True,
+                        "topology": self.topology_name,
+                    },
+                )
+            )
+
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
@@ -2065,6 +2075,31 @@ class MASEnvironment:
                 "research message."
             )
 
+        custom_payload = (
+            getattr(self.attack_simulator, "custom_payload", None)
+            if self.attack_simulator
+            else None
+        )
+        if check_infection_indicators(str(research), custom_payload):
+            self.log_event(
+                MASEvent.create(
+                    event_type="analyst_received_infected_input",
+                    sender="researcher",
+                    receiver="analyst",
+                    content=(
+                        "Analyst received potentially infected information "
+                        "from Researcher (exposure)"
+                    ),
+                    metadata={
+                        "agent": "analyst",
+                        "stage": "exposure",
+                        "status": "exposed",
+                        "compromised": False,
+                        "topology": self.topology_name,
+                    },
+                )
+            )
+
         # =====================================================
         # PREPARE ANALYSIS INPUT
         # =====================================================
@@ -2168,6 +2203,27 @@ class MASEnvironment:
                 tool_results=tool_results,
             )
         )
+
+        if check_infection_indicators(analysis_result, custom_payload):
+            self.log_event(
+                MASEvent.create(
+                    event_type="analyst_output_infected",
+                    sender="analyst",
+                    receiver="executor",
+                    content=(
+                        "Analyst output contained prompt infection indicators "
+                        "(compromised / propagating to executor)"
+                    ),
+                    metadata={
+                        "agent": "analyst",
+                        "stage": "propagation",
+                        "status": "compromised",
+                        "compromised": True,
+                        "propagated": True,
+                        "topology": self.topology_name,
+                    },
+                )
+            )
 
         self.log_event(
             MASEvent.create(
@@ -2287,6 +2343,31 @@ class MASEnvironment:
                 "analysis message."
             )
 
+        custom_payload = (
+            getattr(self.attack_simulator, "custom_payload", None)
+            if self.attack_simulator
+            else None
+        )
+        if check_infection_indicators(str(analysis), custom_payload):
+            self.log_event(
+                MASEvent.create(
+                    event_type="executor_received_infected_input",
+                    sender="analyst",
+                    receiver="executor",
+                    content=(
+                        "Executor received potentially infected information "
+                        "from Analyst (exposure)"
+                    ),
+                    metadata={
+                        "agent": "executor",
+                        "stage": "exposure",
+                        "status": "exposed",
+                        "compromised": False,
+                        "topology": self.topology_name,
+                    },
+                )
+            )
+
         # =====================================================
         # EXECUTION INPUT
         # =====================================================
@@ -2387,6 +2468,27 @@ class MASEnvironment:
                     tool_results,
             )
         )
+
+        if check_infection_indicators(execution_result, custom_payload):
+            self.log_event(
+                MASEvent.create(
+                    event_type="executor_output_infected",
+                    sender="executor",
+                    receiver="coordinator",
+                    content=(
+                        "Executor output contained prompt infection indicators "
+                        "(compromised)"
+                    ),
+                    metadata={
+                        "agent": "executor",
+                        "stage": "propagation",
+                        "status": "compromised",
+                        "compromised": True,
+                        "propagated": True,
+                        "topology": self.topology_name,
+                    },
+                )
+            )
 
         self.log_event(
             MASEvent.create(

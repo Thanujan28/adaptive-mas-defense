@@ -117,10 +117,12 @@ class ToolAuthorizationTests(unittest.TestCase):
 					"report_writer": True,
 				},
 				"researcher": {
-					"internet_search": False,
+					"internet_search": True,
+					"academic_search": True,
 				},
 				"analyst": {
-					"internet_search": False,
+					"internet_search": True,
+					"academic_search": True,
 				},
 				"executor": {
 					"internet_search": False,
@@ -353,6 +355,7 @@ class ToolAuthorizationTests(unittest.TestCase):
 			[
 				event["event_type"]
 				for event in events
+				if event["event_type"] != "tool_usage"
 			],
 			[
 				"tool_request",

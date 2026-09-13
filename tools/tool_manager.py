@@ -186,7 +186,7 @@ class ToolManager:
             "executor": ["mock_email", "mock_mail"],
         }
 
-        self.current_topology = None
+        self.current_topology = "centralized"
         self._registry_initialized = True
 
     # =========================================================
@@ -194,7 +194,17 @@ class ToolManager:
     # =========================================================
 
     def set_topology(self, topology_name: str):
-
+        valid = {
+            "centralized",
+            "layered",
+            "fully_connected_p2p",
+            "fully_connected",
+            "shared_pool",
+            "p2p_mesh",
+            "decentralized",
+        }
+        if not topology_name or topology_name.lower() not in valid:
+            raise ValueError(f"Unknown topology: {topology_name}")
         self.current_topology = topology_name.lower()
 
     # =========================================================
@@ -206,13 +216,22 @@ class ToolManager:
         agent: str,
         tool_name: str
     ) -> bool:
-
+        if not agent or not tool_name:
+            return False
+        if tool_name not in self.tools:
+            return False
         allowed_tools = self.permissions.get(
             agent,
             []
         )
-
         return tool_name in allowed_tools
+
+    def is_role_allowed(
+        self,
+        agent: str,
+        tool_name: str
+    ) -> bool:
+        return self.is_allowed(agent, tool_name)
 
     # =========================================================
     # TOOL EXECUTION
@@ -300,15 +319,26 @@ class ToolManager:
         # Authorization
         # -----------------------------------------------------
 
-        if not self.is_allowed(
-            authorization_agent or agent,
-            tool_name
-        ):
-
-            raise PermissionError(
-                f"Agent '{agent}' is not authorized "
-                f"to use tool '{tool_name}'."
-            )
+        if self.current_topology == "centralized":
+            if not self.is_role_allowed(authorization_agent or agent, tool_name):
+                raise PermissionError(
+                    f"Agent '{authorization_agent or agent}' is not authorized "
+                    f"to use tool '{tool_name}'."
+                )
+            if agent != "coordinator":
+                raise PermissionError(
+                    f"Agent '{agent}' is not authorized "
+                    f"to execute tool '{tool_name}' in centralized topology."
+                )
+        else:
+            if not self.is_allowed(
+                authorization_agent or agent,
+                tool_name
+            ):
+                raise PermissionError(
+                    f"Agent '{authorization_agent or agent}' is not authorized "
+                    f"to use tool '{tool_name}'."
+                )
 
         # -----------------------------------------------------
         # Validate arguments
