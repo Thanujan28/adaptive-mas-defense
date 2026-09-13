@@ -161,7 +161,7 @@ class CommunicationTopology:
     @staticmethod
     def layered(agents: List[str]):
         """
-        True layered / hierarchical topology.
+        Layered / hierarchical topology.
 
         Communication structure:
 
@@ -181,14 +181,14 @@ class CommunicationTopology:
             topology_name="layered"
         )
 
-        legacy_agents = {
+        required_agents = {
             "coordinator",
             "researcher",
             "analyst",
             "executor",
         }
-        if set(agents) == legacy_agents:
-            topology = CommunicationTopology(agents, topology_name="layered")
+
+        if set(agents) == required_agents:
             for first, second in (
                 ("coordinator", "researcher"),
                 ("researcher", "analyst"),
@@ -197,44 +197,8 @@ class CommunicationTopology:
                 topology.add_bidirectional_connection(first, second)
             return topology
 
-        required_agents = {
-            "coordinator",
-            "planner",
-            "researcher-1",
-            "researcher-2",
-            "analyst-1",
-            "analyst-2",
-            "executor-1",
-            "executor-2",
-        }
-
-        missing = required_agents - set(agents)
-
-        if missing:
-            raise ValueError(
-                "Layered topology requires agents: "
-                f"{sorted(required_agents)}. "
-                f"Missing: {sorted(missing)}"
-            )
-
-        layers = [
-            ["coordinator"],
-            ["planner"],
-            ["researcher-1", "researcher-2"],
-            ["analyst-1", "analyst-2"],
-            ["executor-1", "executor-2"],
-        ]
-
-        for layer in layers:
-            for sender in layer:
-                for receiver in layer:
-                    if sender != receiver:
-                        topology.add_connection(sender, receiver)
-
-        for current_layer, next_layer in zip(layers, layers[1:]):
-            for sender in current_layer:
-                for receiver in next_layer:
-                    topology.add_bidirectional_connection(sender, receiver)
+        for first, second in zip(agents, agents[1:]):
+            topology.add_bidirectional_connection(first, second)
 
         return topology
 

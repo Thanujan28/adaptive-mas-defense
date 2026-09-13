@@ -92,8 +92,8 @@ class ToolManager:
         # communication topology.
         #
         # Coordinator -> authorized
-        # Planner, Researchers, and Analysts -> authorized
-        # Executors -> NOT authorized
+        # Researcher and Analyst -> authorized
+        # Executor -> authorized for mock email/calendar only
         #
         # This policy is identical for every topology.
         # =====================================================
@@ -111,60 +111,6 @@ class ToolManager:
                 "mock_calender",
             ],
 
-            "planner": [
-                "internet_search",
-                "academic_search",
-                "source_collector",
-                "mock_calendar",
-                "mock_email",
-                "mock_mail",
-                "mock_calender",
-            ],
-
-            "researcher-1": [
-                "internet_search",
-                "academic_search",
-                "source_collector",
-                "mock_calendar",
-                "mock_email",
-                "mock_mail",
-                "mock_calender",
-            ],
-
-            "researcher-2": [
-                "internet_search",
-                "academic_search",
-                "source_collector",
-                "mock_calendar",
-                "mock_email",
-                "mock_mail",
-                "mock_calender",
-            ],
-
-            "analyst-1": [
-                "internet_search",
-                "academic_search",
-                "source_collector",
-                "mock_calendar",
-                "mock_email",
-                "mock_mail",
-                "mock_calender",
-            ],
-
-            "analyst-2": [
-                "internet_search",
-                "academic_search",
-                "source_collector",
-                "mock_calendar",
-                "mock_email",
-                "mock_mail",
-                "mock_calender",
-            ],
-
-            "executor-1": ["mock_email", "mock_mail", "mock_calendar", "mock_calender"],
-            "executor-2": ["mock_email", "mock_mail"],
-
-            # Compatibility aliases for the former four-agent API.
             "researcher": [
                 "internet_search",
                 "academic_search",
@@ -174,6 +120,7 @@ class ToolManager:
                 "mock_mail",
                 "mock_calender",
             ],
+
             "analyst": [
                 "internet_search",
                 "academic_search",
@@ -183,7 +130,13 @@ class ToolManager:
                 "mock_mail",
                 "mock_calender",
             ],
-            "executor": ["mock_email", "mock_mail"],
+
+            "executor": [
+                "mock_email",
+                "mock_mail",
+                "mock_calendar",
+                "mock_calender",
+            ],
         }
 
         self.current_topology = "centralized"

@@ -5,13 +5,9 @@ from environment.topology import CommunicationTopology
 
 AGENTS = [
     "coordinator",
-    "planner",
-    "researcher-1",
-    "researcher-2",
-    "analyst-1",
-    "analyst-2",
-    "executor-1",
-    "executor-2",
+    "researcher",
+    "analyst",
+    "executor",
 ]
 
 
@@ -27,17 +23,17 @@ class TopologyInvariantTests(unittest.TestCase):
 
     def test_centralized_forbids_direct_downstream_edges(self):
         topology = CommunicationTopology.centralized(AGENTS)
-        self.assertFalse(topology.can_communicate("researcher-1", "analyst-1"))
+        self.assertFalse(topology.can_communicate("researcher", "analyst"))
         self.assertEqual(
-            topology.shortest_path("researcher-1", "analyst-1"),
-            ("researcher-1", "coordinator", "analyst-1"),
+            topology.shortest_path("researcher", "analyst"),
+            ("researcher", "coordinator", "analyst"),
         )
 
     def test_shared_pool_has_delivery_invariants(self):
         topology = CommunicationTopology.shared_pool(AGENTS)
-        self.assertTrue(topology.can_communicate("researcher-1", "shared_pool"))
-        self.assertTrue(topology.can_communicate("shared_pool", "analyst-1"))
-        self.assertFalse(topology.can_communicate("researcher-1", "analyst-1"))
+        self.assertTrue(topology.can_communicate("researcher", "shared_pool"))
+        self.assertTrue(topology.can_communicate("shared_pool", "analyst"))
+        self.assertFalse(topology.can_communicate("researcher", "analyst"))
 
 
 if __name__ == "__main__":

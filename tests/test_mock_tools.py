@@ -66,7 +66,7 @@ class MockToolTests(unittest.TestCase):
     def test_executor_meeting_instruction_becomes_calendar_request(self):
         from agents.executor import ExecutorAgent, _calendar_description_from_analysis
 
-        request = ExecutorAgent(name="executor-1").create_tool_request(
+        request = ExecutorAgent(name="executor").create_tool_request(
             "Schedule a 60-minute research meeting for next Wednesday at 10:00 AM, "
             "create a calendar event titled ‘AI Agent Security Research Meeting’ "
             "and invite the Coordinator, Researcher-1, Researcher-2, Analyst-1, "
@@ -150,18 +150,18 @@ class MockToolTests(unittest.TestCase):
 
     def test_agent_can_request_both_mock_tool_names(self):
         manager = ToolManager()
-        self.assertTrue(manager.is_allowed("researcher-1", "mock_calendar"))
-        self.assertTrue(manager.is_allowed("researcher-1", "mock_mail"))
+        self.assertTrue(manager.is_allowed("researcher", "mock_calendar"))
+        self.assertTrue(manager.is_allowed("researcher", "mock_mail"))
         self.assertIs(manager.tools["mock_mail"], manager.tools["mock_email"])
         self.assertIs(
             manager.tools["mock_calender"],
             manager.tools["mock_calendar"],
         )
-        self.assertTrue(manager.is_allowed("researcher-1", "mock_calender"))
+        self.assertTrue(manager.is_allowed("researcher", "mock_calender"))
 
         environment = MASEnvironment(topology_name="layered")
         environment.request_tool(
-            requesting_agent="researcher-1",
+            requesting_agent="researcher",
             tool_name="mock_calendar",
             arguments={"operation": "list"},
         )
@@ -179,18 +179,18 @@ class MockToolTests(unittest.TestCase):
             "shared_pool",
         ):
             manager.set_topology(topology_name)
-            self.assertTrue(manager.is_allowed("researcher-1", "mock_calendar"))
-            self.assertTrue(manager.is_allowed("analyst-1", "mock_email"))
-            self.assertTrue(manager.is_allowed("executor-1", "mock_email"))
-            self.assertTrue(manager.is_allowed("executor-1", "mock_calendar"))
-            self.assertFalse(manager.is_allowed("executor-1", "internet_search"))
+            self.assertTrue(manager.is_allowed("researcher", "mock_calendar"))
+            self.assertTrue(manager.is_allowed("analyst", "mock_email"))
+            self.assertTrue(manager.is_allowed("executor", "mock_email"))
+            self.assertTrue(manager.is_allowed("executor", "mock_calendar"))
+            self.assertFalse(manager.is_allowed("executor", "internet_search"))
 
     def test_tool_events_preserve_route_identity_and_topology(self):
         for topology_name, requesting_agent in (
-            ("centralized", "researcher-1"),
-            ("layered", "researcher-1"),
-            ("fully_connected", "researcher-1"),
-            ("shared_pool", "researcher-1"),
+            ("centralized", "researcher"),
+            ("layered", "researcher"),
+            ("fully_connected", "researcher"),
+            ("shared_pool", "researcher"),
         ):
             with self.subTest(topology=topology_name):
                 environment = MASEnvironment(topology_name=topology_name)

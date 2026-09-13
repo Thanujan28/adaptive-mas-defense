@@ -101,11 +101,11 @@ class ResourceLimitTests(unittest.TestCase):
         )()
         control_plane = ToolControlPlane(manager)
         request = ToolRequest(
-            agent="executor-2",
-            tool_name="mock_calendar",
-            arguments={"operation": "list"},
+            agent="executor",
+            tool_name="internet_search",
+            arguments={"query": "test"},
             request_id="request-1",
-            metadata={"requester": "executor-2"},
+            metadata={"requester": "executor"},
         )
         with self.assertRaises(PermissionError):
             control_plane.submit(request, submitted_by="coordinator")
