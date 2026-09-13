@@ -272,26 +272,14 @@ class ToolManager:
         # Authorization
         # -----------------------------------------------------
 
-        if self.current_topology == "centralized":
-            if not self.is_role_allowed(authorization_agent or agent, tool_name):
-                raise PermissionError(
-                    f"Agent '{authorization_agent or agent}' is not authorized "
-                    f"to use tool '{tool_name}'."
-                )
-            if agent != "coordinator":
-                raise PermissionError(
-                    f"Agent '{agent}' is not authorized "
-                    f"to execute tool '{tool_name}' in centralized topology."
-                )
-        else:
-            if not self.is_allowed(
-                authorization_agent or agent,
-                tool_name
-            ):
-                raise PermissionError(
-                    f"Agent '{authorization_agent or agent}' is not authorized "
-                    f"to use tool '{tool_name}'."
-                )
+        if not self.is_allowed(
+            authorization_agent or agent,
+            tool_name
+        ):
+            raise PermissionError(
+                f"Agent '{authorization_agent or agent}' is not authorized "
+                f"to use tool '{tool_name}'."
+            )
 
         # -----------------------------------------------------
         # Validate arguments

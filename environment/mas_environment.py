@@ -1043,7 +1043,7 @@ class MASEnvironment:
         )
 
         authorized = (
-            self.tool_manager.is_role_allowed(
+            self.tool_manager.is_allowed(
                 requesting_agent,
                 tool_name,
             )
@@ -1860,28 +1860,22 @@ class MASEnvironment:
 
         if tool_request:
 
-            try:
+            result = self.request_tool(
+                requesting_agent=
+                    tool_request[
+                        "agent"
+                    ],
 
-                result = self.request_tool(
-                    requesting_agent=
-                        tool_request[
-                            "agent"
-                        ],
+                tool_name=
+                    tool_request[
+                        "tool_name"
+                    ],
 
-                    tool_name=
-                        tool_request[
-                            "tool_name"
-                        ],
-
-                    arguments=
-                        tool_request[
-                            "arguments"
-                        ],
-                )
-
-            except PermissionError:
-
-                result = []
+                arguments=
+                    tool_request[
+                        "arguments"
+                    ],
+            )
 
             if isinstance(
                 result,
@@ -2139,28 +2133,22 @@ class MASEnvironment:
 
         if tool_request:
 
-            try:
+            result = self.request_tool(
+                requesting_agent=
+                    tool_request[
+                        "agent"
+                    ],
 
-                result = self.request_tool(
-                    requesting_agent=
-                        tool_request[
-                            "agent"
-                        ],
+                tool_name=
+                    tool_request[
+                        "tool_name"
+                    ],
 
-                    tool_name=
-                        tool_request[
-                            "tool_name"
-                        ],
-
-                    arguments=
-                        tool_request[
-                            "arguments"
-                        ],
-                )
-
-            except PermissionError:
-
-                result = []
+                arguments=
+                    tool_request[
+                        "arguments"
+                    ],
+            )
 
             if isinstance(
                 result,
@@ -2405,28 +2393,22 @@ class MASEnvironment:
 
         if tool_request:
 
-            try:
+            result = self.request_tool(
+                requesting_agent=
+                    tool_request[
+                        "agent"
+                    ],
 
-                result = self.request_tool(
-                    requesting_agent=
-                        tool_request[
-                            "agent"
-                        ],
+                tool_name=
+                    tool_request[
+                        "tool_name"
+                    ],
 
-                    tool_name=
-                        tool_request[
-                            "tool_name"
-                        ],
-
-                    arguments=
-                        tool_request[
-                            "arguments"
-                        ],
-                )
-
-            except PermissionError:
-
-                result = []
+                arguments=
+                    tool_request[
+                        "arguments"
+                    ],
+            )
 
             if isinstance(
                 result,

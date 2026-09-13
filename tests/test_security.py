@@ -30,23 +30,29 @@ class ToolAuthorizationTests(unittest.TestCase):
 			[]
 		)
 
-	def test_centralized_researcher_is_denied(self):
+	def test_centralized_researcher_can_search(self):
 		self.manager.set_topology("centralized")
-		with self.assertRaises(PermissionError):
+		self.manager.tools["internet_search"] = _EmptySearchTool()
+		self.assertEqual(
 			self.manager.execute(
 				"researcher",
 				"internet_search",
 				{"query": "security"}
-			)
+			),
+			[]
+		)
 
-	def test_centralized_analyst_is_denied(self):
+	def test_centralized_analyst_can_search(self):
 		self.manager.set_topology("centralized")
-		with self.assertRaises(PermissionError):
+		self.manager.tools["academic_search"] = _EmptySearchTool()
+		self.assertEqual(
 			self.manager.execute(
 				"analyst",
 				"academic_search",
 				{"query": "security"}
-			)
+			),
+			[]
+		)
 
 	def test_centralized_executor_is_denied(self):
 		self.manager.set_topology("centralized")
@@ -200,7 +206,9 @@ class ToolAuthorizationTests(unittest.TestCase):
 		with self.assertRaises(ValueError):
 			self.manager.set_topology("unknown_topology")
 
-	def test_centralized_control_plane_requires_coordinator_submitter(self):
+	def test_centralized_researcher_submits_via_control_plane_succeeds(self):
+		self.manager.set_topology("centralized")
+		self.manager.tools["internet_search"] = _EmptySearchTool()
 		control_plane = ToolControlPlane(self.manager)
 		request = ToolRequest(
 			agent="researcher",
@@ -208,11 +216,13 @@ class ToolAuthorizationTests(unittest.TestCase):
 			arguments={"query": "security"},
 		)
 
-		with self.assertRaises(PermissionError):
+		self.assertEqual(
 			control_plane.submit(
 				request,
 				submitted_by="researcher"
-			)
+			),
+			[]
+		)
 
 	def test_centralized_researcher_request_is_forwarded_by_coordinator(self):
 		environment = MASEnvironment(
@@ -243,11 +253,11 @@ class ToolAuthorizationTests(unittest.TestCase):
 			"tool_manager"
 		)
 
-	def test_centralized_researcher_cannot_access_control_plane_directly(self):
+	def test_control_plane_denies_unauthorized_tool(self):
 		self.manager.set_topology("centralized")
 		control_plane = ToolControlPlane(self.manager)
 		request = ToolRequest(
-			agent="researcher",
+			agent="executor",
 			tool_name="internet_search",
 			arguments={"query": "security"},
 		)
@@ -255,7 +265,7 @@ class ToolAuthorizationTests(unittest.TestCase):
 		with self.assertRaises(PermissionError):
 			control_plane.submit(
 				request,
-				submitted_by="researcher"
+				submitted_by="executor"
 			)
 
 	def test_layered_control_plane_accepts_researcher_directly(self):

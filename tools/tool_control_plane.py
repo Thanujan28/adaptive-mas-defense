@@ -15,39 +15,17 @@ class ToolControlPlane:
         if not isinstance(request, ToolRequest):
             raise TypeError("Tool control plane requires a ToolRequest.")
 
-        if (
-            self.tool_manager.current_topology == "centralized"
-            and submitted_by != "coordinator"
-        ):
+        if not self.tool_manager.is_allowed(request.agent, request.tool_name):
             raise PermissionError(
-                "Only the Coordinator may submit tool requests "
-                "in centralized topology."
+                f"Agent '{request.agent}' is not authorized "
+                f"to use tool '{request.tool_name}'."
             )
-
-        if (
-            submitted_by.startswith("executor")
-            and request.tool_name not in (
-                "mock_email",
-                "mock_mail",
-                "mock_calendar",
-                "mock_calender",
-            )
-        ):
-            raise PermissionError(
-                "Executors are only authorized to submit mock email requests."
-            )
-
-        execution_agent = (
-            "coordinator"
-            if self.tool_manager.current_topology == "centralized"
-            else request.agent
-        )
 
         return self.tool_manager.execute(
-            agent=execution_agent,
+            agent=request.agent,
             tool_name=request.tool_name,
             arguments=request.arguments,
-            authorization_agent=request.requester,
+            authorization_agent=request.requester or request.agent,
             request_id=request.request_id,
             metadata=request.metadata,
         )
