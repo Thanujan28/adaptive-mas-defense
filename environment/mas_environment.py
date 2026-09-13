@@ -33,19 +33,11 @@ from environment.resource_accounting import (
 
 class MASState(TypedDict):
 
-    # =====================================================
-    # WORKFLOW / ORCHESTRATION STATE
-    # =====================================================
-
     task: str
 
     plan: Optional[dict]
 
     error: Optional[str]
-
-    # =====================================================
-    # FINAL SYSTEM OUTPUT
-    # =====================================================
 
     final_result: Optional[str]
 
@@ -73,7 +65,6 @@ class MASEnvironment:
              v
           Executor
 
-
     LangGraph
         -> workflow execution
 
@@ -84,19 +75,15 @@ class MASEnvironment:
         -> per-agent episodic memory
 
     ToolManager / ToolControlPlane
-        -> controlled tool execution
+        -> controlled external tool execution
 
     MASEvent
         -> event logging
 
-
-    Supported communication topologies:
-
-        1. layered
-        2. centralized
-        3. fully_connected_p2p
-        4. shared_pool
-
+    Prompt Infection
+        -> optional interception of external tool/document
+           results before those results are delivered to
+           the requesting victim agent.
 
     Important:
 
@@ -107,12 +94,27 @@ class MASEnvironment:
 
         Agent-to-agent information travels through the
         communication topology.
+
+        Prompt Infection does NOT directly inject content
+        into an agent mailbox.
+
+        Instead, the attack simulator operates on content
+        returned by an external tool/document source.
+
+        The victim agent receives the resulting content
+        through the normal tool-result path.
+
+        The environment does not select an attack target.
+
+        The agent that naturally requests the external
+        information becomes the exposed agent.
     """
 
     def __init__(
         self,
         topology_name="centralized",
         config_path="configs/config.yaml",
+        attack_simulator=None,
     ):
 
         # =====================================================
@@ -127,6 +129,12 @@ class MASEnvironment:
         ]
 
         self.agent_mailboxes = {}
+
+        # =====================================================
+        # ATTACK SIMULATOR
+        # =====================================================
+
+        self.attack_simulator = attack_simulator
 
         # =====================================================
         # MEMORY SYSTEM
@@ -267,15 +275,194 @@ class MASEnvironment:
         self.graph = self._build_graph()
 
     # =========================================================
+    # ATTACK SIMULATOR CONFIGURATION
+    # =========================================================
+
+    def set_attack_simulator(
+        self,
+        attack_simulator,
+    ):
+        """
+        Attach an attack simulator to the environment.
+
+        The simulator is used only when an external tool
+        result is returned.
+
+        It does not directly inject a message into a victim
+        agent.
+
+        The requesting agent is determined naturally by the
+        tool request.
+        """
+
+        self.attack_simulator = attack_simulator
+
+    # =========================================================
+    # EXTERNAL TOOL RESULT PROCESSING
+    # =========================================================
+
+    def _process_external_tool_result(
+        self,
+        result,
+        requesting_agent: str,
+        tool_name: str,
+        request_id: str,
+    ):
+        """
+        Pass an external tool/document result through the
+        optional attack simulator.
+
+        This is the Prompt Infection entry point.
+
+        The environment itself does NOT decide whether an
+        attack occurs.
+
+        The attack simulator decides whether the external
+        result should be infected.
+
+        If no attack simulator is attached, the result is
+        returned unchanged.
+
+        The simulator should return the original result when
+        no infection is performed.
+
+        Expected simulator interface:
+
+            infect_external_result(
+                result=result,
+                requesting_agent=requesting_agent,
+                tool_name=tool_name,
+                request_id=request_id,
+            )
+
+        The simulator may alternatively return a dictionary:
+
+            {
+                "result": modified_result,
+                "infected": True,
+                "metadata": {...}
+            }
+
+        Attack metadata is kept outside the LLM content.
+        """
+
+        if self.attack_simulator is None:
+
+            return result
+
+        simulator_method = getattr(
+            self.attack_simulator,
+            "infect_external_result",
+            None,
+        )
+
+        if simulator_method is None:
+
+            raise AttributeError(
+                "Attack simulator must provide "
+                "'infect_external_result()'."
+            )
+
+        processed = simulator_method(
+            result=result,
+            requesting_agent=requesting_agent,
+            tool_name=tool_name,
+            request_id=request_id,
+        )
+
+        # =====================================================
+        # SIMPLE RETURN
+        # =====================================================
+
+        if not isinstance(
+            processed,
+            dict
+        ):
+
+            return processed
+
+        # =====================================================
+        # STRUCTURED ATTACK RESULT
+        # =====================================================
+
+        if "result" not in processed:
+
+            return processed
+
+        processed_result = (
+            processed["result"]
+        )
+
+        infected = bool(
+            processed.get(
+                "infected",
+                False,
+            )
+        )
+
+        attack_metadata = (
+            processed.get(
+                "metadata",
+                {},
+            )
+        )
+
+        if infected:
+
+            self.log_event(
+                MASEvent.create(
+                    event_type="external_result_injection",
+
+                    sender="attack_simulator",
+
+                    receiver=requesting_agent,
+
+                    content=(
+                        f"External result from "
+                        f"'{tool_name}' was infected "
+                        f"before delivery to {requesting_agent}"
+                    ),
+
+                    tool_call=tool_name,
+
+                    request_id=request_id,
+
+                    metadata={
+                        "attack_type":
+                            attack_metadata.get(
+                                "attack_type",
+                                "prompt_infection",
+                            ),
+
+                        "target_agent":
+                            requesting_agent,
+
+                        "tool_name":
+                            tool_name,
+
+                        "request_id":
+                            request_id,
+
+                        "infection_hop":
+                            attack_metadata.get(
+                                "infection_hop",
+                                0,
+                            ),
+
+                        "topology":
+                            self.topology_name,
+                    },
+                )
+            )
+
+        return processed_result
+
+    # =========================================================
     # EVENT LOGGING HELPERS
     # =========================================================
 
     @staticmethod
     def _content_length(content) -> int:
-        """
-        Return content length without storing the actual
-        content inside the event log.
-        """
 
         if content is None:
             return 0
@@ -284,12 +471,6 @@ class MASEnvironment:
 
     @staticmethod
     def _argument_keys(arguments: dict) -> list:
-        """
-        Return only argument names.
-
-        Actual argument values are deliberately excluded
-        from the event log.
-        """
 
         if not isinstance(arguments, dict):
             return []
@@ -374,11 +555,10 @@ class MASEnvironment:
         content: Optional[str] = None,
         metadata: Optional[dict] = None,
     ):
-        """Record attack, investigation, containment,
-        or resource-allocation evidence."""
 
         if event_type not in {
             "attack",
+            "external_result_injection",
             "investigation",
             "containment",
             "resource_allocation",
@@ -522,17 +702,6 @@ class MASEnvironment:
         content: str,
         metadata=None,
     ):
-        """
-        Deliver a message through the active communication
-        topology.
-
-        Shared pool:
-            Message is written to the shared pool.
-
-        Other topologies:
-            Message is delivered only when NetworkX permits
-            the corresponding directed edge.
-        """
 
         if sender not in self.agent_names:
             raise ValueError(
@@ -556,19 +725,14 @@ class MASEnvironment:
         message = {
             "message_id":
                 message_id,
-
             "sender":
                 sender,
-
             "receiver":
                 receiver,
-
             "content":
                 content,
-
             "topology":
                 self.topology_name,
-
             "metadata":
                 metadata or {},
         }
@@ -595,18 +759,14 @@ class MASEnvironment:
                     metadata={
                         "message_id":
                             message_id,
-
                         "target_agent":
                             receiver,
-
                         "topology":
                             "shared_pool",
-
                         "content_length":
                             self._content_length(
                                 content
                             ),
-
                         "pool_size":
                             len(
                                 self.shared_pool
@@ -647,22 +807,18 @@ class MASEnvironment:
                 metadata={
                     "message_id":
                         message_id,
-
                     "topology":
                         self.topology_name,
-
                     "content_length":
                         self._content_length(
                             content
                         ),
-
                     "mailbox_size":
                         len(
                             self.agent_mailboxes[
                                 receiver
                             ]
                         ),
-
                     **(
                         metadata
                         or {}
@@ -682,9 +838,6 @@ class MASEnvironment:
         source: str,
         receiver: str,
     ) -> str:
-        """
-        Return the sender recorded on the final topology hop.
-        """
 
         if self.topology_name == "shared_pool":
             return source
@@ -710,15 +863,6 @@ class MASEnvironment:
         receiver: str,
         expected_sender=None,
     ):
-        """
-        Retrieve the oldest unread topology-delivered message.
-
-        Communication is consumed from the receiving agent's
-        mailbox/shared pool.
-
-        Agent outputs are therefore never obtained from
-        LangGraph state.
-        """
 
         if receiver not in self.agent_names:
             raise ValueError(
@@ -757,25 +901,19 @@ class MASEnvironment:
             self.log_event(
                 MASEvent.create(
                     event_type="pool_read",
-
                     receiver=receiver,
-
                     content=(
                         f"{receiver} retrieved "
                         f"a message from "
                         f"{message['sender']}"
                     ),
-
                     metadata={
                         "message_id":
                             message["message_id"],
-
                         "sender":
                             message["sender"],
-
                         "topology":
                             "shared_pool",
-
                         "remaining_pool_size":
                             len(
                                 self.shared_pool
@@ -811,35 +949,28 @@ class MASEnvironment:
                 self.log_event(
                     MASEvent.create(
                         event_type="message_receive",
-
                         sender=message[
                             "sender"
                         ],
-
                         receiver=receiver,
-
                         content=(
                             f"{receiver} received "
                             f"a message from "
                             f"{message['sender']}"
                         ),
-
                         metadata={
                             "message_id":
                                 message[
                                     "message_id"
                                 ],
-
                             "topology":
                                 self.topology_name,
-
                             "content_length":
                                 self._content_length(
                                     message[
                                         "content"
                                     ]
                                 ),
-
                             "remaining_mailbox_size":
                                 len(mailbox),
                         },
@@ -853,209 +984,6 @@ class MASEnvironment:
         return None
 
     # =========================================================
-    # EXTERNAL MESSAGE
-    # =========================================================
-
-    def receive_external_message(
-        self,
-        receiver: str,
-    ):
-
-        if receiver not in self.agent_names:
-            raise ValueError(
-                f"Unknown receiver: {receiver}"
-            )
-
-        # =====================================================
-        # SHARED POOL
-        # =====================================================
-
-        if self.topology_name == "shared_pool":
-
-            for index, message in enumerate(
-                self.shared_pool
-            ):
-
-                if (
-                    message["receiver"]
-                    == receiver
-                    and message["sender"]
-                    == "external_source"
-                    and message.get(
-                        "metadata",
-                        {}
-                    ).get(
-                        "external_injection",
-                        False,
-                    )
-                ):
-
-                    message = (
-                        self.shared_pool.pop(
-                            index
-                        )
-                    )
-
-                    self.log_event(
-                        MASEvent.create(
-                            event_type=
-                                "external_message_receive",
-
-                            sender=
-                                "external_source",
-
-                            receiver=
-                                receiver,
-
-                            content=(
-                                f"{receiver} consumed "
-                                f"external content"
-                            ),
-
-                            metadata={
-                                "message_id":
-                                    message[
-                                        "message_id"
-                                    ],
-
-                                "topology":
-                                    self.topology_name,
-
-                                "external_injection":
-                                    True,
-
-                                **message.get(
-                                    "metadata",
-                                    {}
-                                ),
-                            },
-                        )
-                    )
-
-                    return message
-
-            return None
-
-        # =====================================================
-        # NORMAL TOPOLOGIES
-        # =====================================================
-
-        mailbox = self.agent_mailboxes[
-            receiver
-        ]
-
-        for index, message in enumerate(
-            mailbox
-        ):
-
-            if (
-                message["sender"]
-                == "external_source"
-                and message.get(
-                    "metadata",
-                    {}
-                ).get(
-                    "external_injection",
-                    False,
-                )
-            ):
-
-                message = mailbox.pop(
-                    index
-                )
-
-                self.log_event(
-                    MASEvent.create(
-                        event_type=
-                            "external_message_receive",
-
-                        sender=
-                            "external_source",
-
-                        receiver=
-                            receiver,
-
-                        content=(
-                            f"{receiver} consumed "
-                            f"external content"
-                        ),
-
-                        metadata={
-                            "message_id":
-                                message[
-                                    "message_id"
-                                ],
-
-                            "topology":
-                                self.topology_name,
-
-                            "external_injection":
-                                True,
-
-                            **message.get(
-                                "metadata",
-                                {}
-                            ),
-                        },
-                    )
-                )
-
-                return message
-
-        return None
-
-    # =========================================================
-    # SHARED POOL READ
-    # =========================================================
-
-    def read_shared_pool(
-        self,
-        receiver: str,
-    ):
-
-        if self.topology_name != "shared_pool":
-            raise ValueError(
-                "Shared pool is only available "
-                "under shared_pool topology."
-            )
-
-        messages = [
-            message
-            for message in self.shared_pool
-            if message["receiver"]
-            == receiver
-        ]
-
-        self.log_event(
-            MASEvent.create(
-                event_type="pool_read",
-
-                receiver=receiver,
-
-                content=(
-                    f"{receiver} retrieved "
-                    f"{len(messages)} messages "
-                    f"from shared pool"
-                ),
-
-                metadata={
-                    "topology":
-                        "shared_pool",
-
-                    "message_count":
-                        len(messages),
-
-                    "pool_size":
-                        len(
-                            self.shared_pool
-                        ),
-                },
-            )
-        )
-
-        return messages
-
-    # =========================================================
     # TOOL REQUEST ROUTING
     # =========================================================
 
@@ -1065,12 +993,6 @@ class MASEnvironment:
         tool_name: str,
         arguments: dict,
     ):
-        """
-        Submit a tool request through the Tool Control Plane.
-
-        Authorization remains independent of communication
-        topology.
-        """
 
         request_id = str(
             uuid.uuid4()
@@ -1082,10 +1004,6 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # AUTHORIZATION
-        # =====================================================
-
         authorized = (
             self.tool_manager.is_allowed(
                 requesting_agent,
@@ -1093,27 +1011,17 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # TOOL REQUEST EVENT
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="tool_request",
-
                 sender=requesting_agent,
-
                 receiver="tool_control_plane",
-
                 content=(
                     f"{requesting_agent} requested "
                     f"tool '{tool_name}'"
                 ),
-
                 tool_call=tool_name,
-
                 request_id=request_id,
-
                 metadata={
                     "argument_keys":
                         argument_keys,
@@ -1138,10 +1046,6 @@ class MASEnvironment:
                 },
             )
         )
-
-        # =====================================================
-        # DENIED
-        # =====================================================
 
         if not authorized:
 
@@ -1299,6 +1203,19 @@ class MASEnvironment:
                 )
             )
 
+            # =================================================
+            # EXTERNAL RESULT INTERCEPTION
+            # =================================================
+
+            result = (
+                self._process_external_tool_result(
+                    result=result,
+                    requesting_agent=requesting_agent,
+                    tool_name=tool_name,
+                    request_id=request_id,
+                )
+            )
+
             self.publish_agent_result(
                 sender="coordinator",
                 receiver=requesting_agent,
@@ -1449,10 +1366,6 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # TOOL EXECUTION
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="tool_execution",
@@ -1482,10 +1395,6 @@ class MASEnvironment:
                 },
             )
         )
-
-        # =====================================================
-        # EXECUTE
-        # =====================================================
 
         try:
 
@@ -1555,8 +1464,17 @@ class MASEnvironment:
             raise
 
         # =====================================================
-        # TOOL RESULT
+        # EXTERNAL RESULT INTERCEPTION
         # =====================================================
+
+        result = (
+            self._process_external_tool_result(
+                result=result,
+                requesting_agent=requesting_agent,
+                tool_name=tool_name,
+                request_id=request_id,
+            )
+        )
 
         result_count = (
             len(result)
@@ -1752,10 +1670,6 @@ class MASEnvironment:
 
         task = state["task"]
 
-        # =====================================================
-        # TASK RECEIVED
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="task_received",
@@ -1778,10 +1692,6 @@ class MASEnvironment:
                 },
             )
         )
-
-        # =====================================================
-        # COORDINATOR MEMORY
-        # =====================================================
 
         self.log_memory_write(
             agent_name="coordinator",
@@ -1839,10 +1749,6 @@ class MASEnvironment:
                 "error": str(e),
             }
 
-        # =====================================================
-        # LOG PLAN
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="task_decomposition",
@@ -1877,10 +1783,6 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # COORDINATOR -> RESEARCHER
-        # =====================================================
-
         self.publish_agent_result(
             sender="coordinator",
             receiver="researcher",
@@ -1908,10 +1810,6 @@ class MASEnvironment:
         state: MASState,
     ):
 
-        # =====================================================
-        # RECEIVE COORDINATOR INSTRUCTION
-        # =====================================================
-
         research_message = (
             self.receive_agent_message(
                 receiver="researcher",
@@ -1930,10 +1828,6 @@ class MASEnvironment:
                 "research instruction."
             )
 
-        # =====================================================
-        # EXTRACT RESEARCH INSTRUCTION
-        # =====================================================
-
         research_instruction = (
             research_message.get(
                 "research",
@@ -1947,74 +1841,6 @@ class MASEnvironment:
         )
 
         # =====================================================
-        # EXTERNAL ATTACK CONTENT
-        # =====================================================
-
-        # =====================================================
-# EXTERNAL ATTACK CONTENT
-# =====================================================
-
-        external_message = (
-            self.receive_external_message(
-                receiver="researcher"
-            )
-        )
-
-        if external_message is not None:
-
-            external_content = (
-                external_message["content"]
-            )
-
-            attack_metadata = (
-                external_message.get(
-                    "metadata",
-                    {}
-                )
-            )
-
-            self.log_event(
-                MASEvent.create(
-                    event_type="attack_received",
-
-                    sender="external_source",
-
-                    receiver="researcher",
-
-                    content=(
-                        "Researcher received "
-                        "externally supplied content"
-                    ),
-
-                    metadata={
-                        "attack_type":
-                            attack_metadata.get(
-                                "attack_type"
-                            ),
-
-                        "infection_id":
-                            attack_metadata.get(
-                                "infection_id"
-                            ),
-
-                        "infection_hop":
-                            attack_metadata.get(
-                                "infection_hop",
-                                0,
-                            ),
-
-                        "topology":
-                            self.topology_name,
-                    },
-                )
-            )
-
-            research_instruction = (
-                f"{research_instruction}\n\n"
-                f"EXTERNAL CONTENT:\n"
-                f"{external_content}"
-            )
-        # =====================================================
         # RESEARCH ROLE INSTRUCTION
         # =====================================================
 
@@ -2027,10 +1853,6 @@ class MASEnvironment:
         )
 
         worker = self.researcher
-
-        # =====================================================
-        # RESEARCHER MEMORY
-        # =====================================================
 
         self.read_memory(
             agent_name="researcher",
@@ -2051,10 +1873,6 @@ class MASEnvironment:
         )
 
         tool_results = []
-
-        # =====================================================
-        # TOOL REQUEST
-        # =====================================================
 
         if tool_request:
 
@@ -2116,20 +1934,13 @@ class MASEnvironment:
             tool_results=tool_results,
         )
 
-        # =====================================================
-        # LOG RESULT
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
 
                 sender="researcher",
 
-                content=(
-                    "Researcher completed "
-                    "research stage"
-                ),
+                content=research_result,
 
                 metadata={
                     "stage":
@@ -2151,10 +1962,6 @@ class MASEnvironment:
                 },
             )
         )
-
-        # =====================================================
-        # MEMORY
-        # =====================================================
 
         self.log_memory_write(
             agent_name="researcher",
@@ -2181,6 +1988,11 @@ class MASEnvironment:
 
         # =====================================================
         # RESEARCHER -> ANALYST
+        #
+        # Only the researcher's generated output is sent.
+        #
+        # If Prompt Infection propagates, it must therefore
+        # be reproduced/incorporated by the researcher LLM.
         # =====================================================
 
         self.publish_agent_result(
@@ -2218,10 +2030,6 @@ class MASEnvironment:
                 "Analysis node received "
                 "no plan."
             )
-
-        # =====================================================
-        # ANALYSIS ASSIGNMENT
-        # =====================================================
 
         analysis_instruction = (
             plan["analysis"]
@@ -2267,10 +2075,6 @@ class MASEnvironment:
             f"Research findings:\n"
             f"{research}"
         )
-
-        # =====================================================
-        # ANALYST MEMORY
-        # =====================================================
 
         self.read_memory(
             agent_name="analyst",
@@ -2365,20 +2169,13 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # LOG ANALYSIS
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
 
                 sender="analyst",
 
-                content=(
-                    "Analyst completed "
-                    "analysis stage"
-                ),
+                content=analysis_result,
 
                 metadata={
                     "stage":
@@ -2397,10 +2194,6 @@ class MASEnvironment:
                 },
             )
         )
-
-        # =====================================================
-        # ANALYST MEMORY
-        # =====================================================
 
         self.log_memory_write(
             agent_name="analyst",
@@ -2460,10 +2253,6 @@ class MASEnvironment:
                 "no plan."
             )
 
-        # =====================================================
-        # EXECUTION ASSIGNMENT
-        # =====================================================
-
         execution_instruction = (
             plan["execution"]
         )
@@ -2508,10 +2297,6 @@ class MASEnvironment:
             f"Analyst findings:\n"
             f"{analysis}"
         )
-
-        # =====================================================
-        # EXECUTOR MEMORY
-        # =====================================================
 
         self.read_memory(
             agent_name="executor",
@@ -2603,10 +2388,6 @@ class MASEnvironment:
             )
         )
 
-        # =====================================================
-        # LOG RESULT
-        # =====================================================
-
         self.log_event(
             MASEvent.create(
                 event_type="agent_result",
@@ -2629,13 +2410,9 @@ class MASEnvironment:
                         self._content_length(
                             execution_result
                         ),
-                },
+                }
             )
         )
-
-        # =====================================================
-        # EXECUTOR MEMORY
-        # =====================================================
 
         self.log_memory_write(
             agent_name="executor",
@@ -2686,10 +2463,6 @@ class MASEnvironment:
         state: MASState,
     ):
 
-        # =====================================================
-        # RECEIVE EXECUTOR RESULT
-        # =====================================================
-
         execution = (
             self.receive_agent_message(
                 receiver="coordinator",
@@ -2708,10 +2481,6 @@ class MASEnvironment:
                 "execution result."
             )
 
-        # =====================================================
-        # COORDINATOR MEMORY
-        # =====================================================
-
         self.read_memory(
             agent_name="coordinator",
 
@@ -2720,20 +2489,12 @@ class MASEnvironment:
             top_k=3,
         )
 
-        # =====================================================
-        # FINAL AGGREGATION
-        # =====================================================
-
         final_result = (
             self.coordinator.aggregate(
                 state["task"],
                 execution,
             )
         )
-
-        # =====================================================
-        # LOG FINAL RESULT
-        # =====================================================
 
         self.log_event(
             MASEvent.create(
@@ -2783,10 +2544,6 @@ class MASEnvironment:
                 "final result is empty."
             )
 
-        # =====================================================
-        # REPORT TITLE
-        # =====================================================
-
         task = state.get(
             "task",
             "Multi-Agent System Analysis",
@@ -2795,10 +2552,6 @@ class MASEnvironment:
         report_title = (
             "Multi-Agent System Analysis Report"
         )
-
-        # =====================================================
-        # REPORT WRITER REQUEST
-        # =====================================================
 
         report_request = ToolRequest(
             agent="coordinator",
@@ -2820,10 +2573,6 @@ class MASEnvironment:
             },
         )
 
-        # =====================================================
-        # REPORT WRITER
-        # =====================================================
-
         report_result = (
             self.request_tool(
                 requesting_agent=
@@ -2836,10 +2585,6 @@ class MASEnvironment:
                     report_request.arguments,
             )
         )
-
-        # =====================================================
-        # LOG REPORT
-        # =====================================================
 
         self.log_event(
             MASEvent.create(
@@ -2964,10 +2709,6 @@ class MASEnvironment:
             END,
         )
 
-        # =====================================================
-        # COMPILE
-        # =====================================================
-
         return workflow.compile()
 
     # =========================================================
@@ -2981,13 +2722,6 @@ class MASEnvironment:
         content,
         metadata=None,
     ):
-        """
-        Publish an agent result according to the active
-        communication topology.
-
-        The actual content is passed through every topology
-        hop.
-        """
 
         # =====================================================
         # SHARED POOL
@@ -3161,68 +2895,51 @@ class MASEnvironment:
         self.episode_state.task = task
 
         # =====================================================
-        # ATTACK INJECTION
+        # PROMPT INFECTION
+        #
+        # IMPORTANT:
+        #
+        # Prompt Infection is NOT initialized here by
+        # injecting a message into an agent mailbox.
+        #
+        # The attack simulator is invoked automatically
+        # when a victim agent receives an external tool
+        # result through request_tool().
+        #
+        # attack_injections is retained in the function
+        # signature for compatibility with the previous
+        # environment interface, but it is no longer used
+        # for Prompt Infection.
         # =====================================================
 
-        for injection in (
-            attack_injections or []
-        ):
+        if attack_injections:
 
-            self.inject_external_message(
-                receiver=
-                    injection["receiver"],
+            self.log_event(
+                MASEvent.create(
+                    event_type="attack_configuration",
 
-                content=
-                    injection["content"],
+                    sender="environment",
 
-                metadata=
-                    injection.get(
-                        "metadata",
-                        {},
+                    content=(
+                        "Direct agent injection requests "
+                        "were supplied but are not used "
+                        "by the Prompt Infection path."
                     ),
-            )
 
-            injection_metadata = (
-                injection.get(
-                    "metadata",
-                    {},
+                    metadata={
+                        "attack_type":
+                            "prompt_infection",
+
+                        "injection_count":
+                            len(attack_injections),
+
+                        "injection_mode":
+                            "external_tool_result",
+
+                        "status":
+                            "ignored_for_realistic_mode",
+                    },
                 )
-            )
-
-            self.record_security_event(
-                event_type="attack",
-
-                sender="attack_simulator",
-
-                receiver=
-                    injection["receiver"],
-
-                metadata={
-                    "attack_type":
-                        injection_metadata.get(
-                            "attack_type"
-                        ),
-
-                    "infection_id":
-                        injection_metadata.get(
-                            "infection_id"
-                        ),
-
-                    "infection_hop":
-                        injection_metadata.get(
-                            "infection_hop",
-                            0,
-                        ),
-
-                    "target_agent":
-                        injection["receiver"],
-
-                    "synthetic_payload":
-                        injection_metadata.get(
-                            "synthetic_payload",
-                            True,
-                        ),
-                },
             )
 
         # =====================================================
@@ -3309,7 +3026,7 @@ class MASEnvironment:
         }
 
     # =========================================================
-    # EXTERNAL ATTACK INJECTION
+    # LEGACY EXTERNAL MESSAGE
     # =========================================================
 
     def inject_external_message(
@@ -3319,14 +3036,22 @@ class MASEnvironment:
         metadata=None,
     ):
         """
-        Inject externally sourced content into a victim agent.
+        Legacy direct external-message mechanism.
 
-        The external source is not a MAS agent and therefore
-        does not participate in the normal communication
-        topology.
+        This method is retained for compatibility with the
+        existing environment interface.
 
-        This method is intended for controlled attack
-        simulation experiments.
+        IMPORTANT:
+
+        This method is NOT used by the Prompt Infection
+        experiment.
+
+        Prompt Infection should enter through
+        _process_external_tool_result().
+
+        Keeping this method allows other attack types or
+        future controlled experiments to use direct external
+        messages without coupling Prompt Infection to them.
         """
 
         if receiver not in self.agent_names:

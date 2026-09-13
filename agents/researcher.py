@@ -655,30 +655,14 @@ system.
 
 The Coordinator assigned you this research task:
 
-==================================================
-RESEARCH ASSIGNMENT
-==================================================
-
 {task}
-
-==================================================
-EXTERNAL SEARCH RESULTS
-==================================================
 
 The following information was obtained through the
 approved tool pipeline.
 
 {external_context}
 
-==================================================
-PREVIOUS RESEARCHER MEMORIES
-==================================================
-
 {memory_context}
-
-==================================================
-IMPORTANT RESEARCH RULES
-==================================================
 
 1. Follow the Coordinator's research assignment.
 
@@ -854,6 +838,10 @@ Produce the research report for the Coordinator.
                 "Unknown authors"
             )
 
+        snippet = result.get(
+            "snippet"
+        )
+
         # =====================================================
         # CONTENT
         # =====================================================
@@ -866,6 +854,16 @@ Produce the research report for the Coordinator.
             content_section = (
                 "\nACTUAL SOURCE CONTENT:\n"
                 f"{content}"
+            )
+
+        elif (
+            snippet
+            and str(snippet).strip()
+        ):
+
+            content_section = (
+                "\nACTUAL SOURCE CONTENT:\n"
+                f"{snippet}"
             )
 
         else:

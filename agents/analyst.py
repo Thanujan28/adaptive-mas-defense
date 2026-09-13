@@ -1023,6 +1023,10 @@ Return a structured analysis.
             "not_collected"
         )
 
+        snippet = result.get(
+            "snippet"
+        )
+
         # =====================================================
         # AUTHORS
         # =====================================================
@@ -1052,6 +1056,16 @@ Return a structured analysis.
             content_section = (
                 "\nACTUAL SOURCE CONTENT:\n"
                 f"{content}"
+            )
+
+        elif (
+            snippet
+            and str(snippet).strip()
+        ):
+
+            content_section = (
+                "\nACTUAL SOURCE CONTENT:\n"
+                f"{snippet}"
             )
 
         else:

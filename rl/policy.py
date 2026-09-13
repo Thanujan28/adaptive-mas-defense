@@ -3,8 +3,9 @@ class PPOReward:
 
 	def compute_components(self, events, resource_state):
 		event_types = [event.get("event_type") for event in events]
+		has_attack = "attack" in event_types or "external_result_injection" in event_types
 		return {
-			"detection": 1.0 if "attack" in event_types and "investigation" in event_types else 0.0,
+			"detection": 1.0 if has_attack and "investigation" in event_types else 0.0,
 			"containment": 1.0 if "containment" in event_types else 0.0,
 			"task_completion": 1.0 if "final_result" in event_types else 0.0,
 			"resource_cost": -(

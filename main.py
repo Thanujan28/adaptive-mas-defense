@@ -32,9 +32,9 @@ def main():
         target_agent=target_agent,
     )
 
-    injection = attack.create_injection()
+    environment.set_attack_simulator(attack)
 
-    print("\nPrompt Infection injected into: ",target_agent)
+    print("\nPrompt Infection simulator configured for target agent:", target_agent)
 
     # ---------------------------------------------------------
     # EXECUTE MAS WITH ATTACK
@@ -45,9 +45,6 @@ def main():
 
     result = environment.execute_task(
         task=task,
-        attack_injections=[
-            injection
-        ],
     )
 
     print("\nFinal result:")

@@ -562,6 +562,10 @@ Return only the requested execution result.
             "content_error"
         )
 
+        snippet = result.get(
+            "snippet"
+        )
+
         # =====================================================
         # AUTHORS
         # =====================================================
@@ -591,6 +595,16 @@ Return only the requested execution result.
             content_section = (
                 "\nACTUAL SOURCE CONTENT:\n"
                 f"{content}"
+            )
+
+        elif (
+            snippet
+            and str(snippet).strip()
+        ):
+
+            content_section = (
+                "\nACTUAL SOURCE CONTENT:\n"
+                f"{snippet}"
             )
 
         else:

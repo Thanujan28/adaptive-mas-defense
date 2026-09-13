@@ -5,7 +5,10 @@ class SecurityDetector:
 	"""Deterministic event-based detector used by PPO state/reward code."""
 
 	def detect(self, events: Iterable[Mapping]) -> dict:
-		attacks = [event for event in events if event.get("event_type") == "attack"]
+		attacks = [
+			event for event in events
+			if event.get("event_type") in {"attack", "external_result_injection"}
+		]
 		return {
 			"detected": bool(attacks),
 			"attack_count": len(attacks),
