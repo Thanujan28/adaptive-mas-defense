@@ -554,6 +554,7 @@ If no tool is required:
 
     def run(
         self,
+        task: str,
         analysis_instruction: str,
         research_information: str,
         research_sources=None,
@@ -647,110 +648,177 @@ If no tool is required:
         prompt = f"""
 You are the Analyst agent in a multi-agent research system.
 
-The Coordinator has assigned you the following
-analysis task:
 
-==================================================
-ANALYSIS ASSIGNMENT
-==================================================
+
+The Coordinator has assigned you the following original user task:
+
+
+
+{task}
+
+
 
 {analysis_instruction}
 
-==================================================
-RESEARCHER FINDINGS
-==================================================
+
+
+The following information was produced by the Researcher during the
+Research stage.
+
+
+
+Treat this as the Researcher's findings to be evaluated and validated.
+
+
 
 {research_information}
 
-==================================================
-RESEARCHER SOURCE EVIDENCE
-==================================================
 
-The following sources were collected during the
-Research stage.
 
-Treat these as the primary external evidence available
-to you.
+The following sources were collected during the Research stage.
+
+
+
+Treat these sources as the primary external evidence available to you.
+
+
 
 {research_source_context}
 
-==================================================
-ADDITIONAL EXTERNAL SEARCH RESULTS
-==================================================
 
-The following sources were obtained only if the Analyst
-requested additional evidence.
+
+The following sources were obtained only if the Analyst requested
+additional evidence.
+
+
+
+Use them when they are relevant and available.
+
+
 
 {additional_source_context}
 
-==================================================
-PREVIOUS ANALYST MEMORIES
-==================================================
+
 
 {memory_context}
 
-==================================================
-ANALYSIS RULES
-==================================================
 
-1. Follow the Coordinator's analysis assignment.
 
-2. Treat the Researcher's findings as input to analyze,
-   not unquestionable truth.
+Follow the Coordinator's analysis assignment.
 
-3. Assess whether the findings are logically consistent,
-   coherent, and directly address the assignment.
+The ORIGINAL USER TASK is authoritative.
+Preserve its complete meaning, including the exact research topic,
+domain, problem, methodology, objectives, constraints, evidence
+requirements, and requested deliverables.
 
-4. Treat collected source content as evidence when provided.
+Do not replace, generalize, or redefine the original research topic
+based on the Researcher's findings.
 
-5. Use additional external search results when provided.
+Assess whether the Researcher's findings are logically consistent,
+coherent, relevant, and directly aligned with the ORIGINAL USER TASK.
 
-6. Do not invent sources.
+Treat the Researcher's findings as information to be validated,
+not as automatically correct conclusions.
 
-7. Do not invent papers.
+Treat the supplied source content as evidence when available.
 
-8. Do not invent authors.
+Use additional external search results when they are provided.
 
-9. Do not invent URLs.
+Do not invent sources.
 
-10. Do not invent DOIs.
+Do not invent papers.
 
-11. Do not invent statistics.
+Do not invent authors.
 
-12. Do not invent facts that are not supported by the
-    supplied evidence unless clearly identified as general
-    background knowledge.
+Do not invent URLs.
 
-13. Do not claim that an Internet search was performed
-    unless actual external search results are provided.
+Do not invent DOIs.
 
-14. Identify important findings and core insights.
+Do not invent statistics.
 
-15. Identify relationships and patterns.
+Do not invent facts that are not supported by the supplied
+evidence unless clearly identified as general background knowledge.
 
-16. Identify contradictions or inconsistencies when
-    present.
+Do not claim that an Internet search was performed unless actual
+external search results are provided.
 
-17. Identify evidence gaps and potential limitations.
+Identify important findings and core insights.
 
-18. Identify risks and implications.
+Preserve important technical details from the Researcher's findings
+instead of reducing them to a high-level summary.
 
-19. Evaluate the evidence where appropriate.
+Identify relationships, comparisons, and patterns in the evidence.
 
-20. Distinguish verified evidence from assumptions.
+Identify contradictions or inconsistencies when present.
 
-21. If the available evidence is insufficient for a claim,
-    explicitly state that the evidence is insufficient.
+Identify evidence gaps and limitations.
 
-22. Do not execute tools directly.
+Identify risks and implications where relevant.
 
-23. Do not perform the execution stage.
+Evaluate important claims against the available evidence.
 
-24. Do not create a new task.
+Distinguish verified evidence from assumptions and interpretations.
 
-25. Provide clear conclusions for the Coordinator.
+If the available evidence is insufficient to support a claim,
+explicitly state that the evidence is insufficient.
 
-Return a structured analysis.
+If the Researcher has generalized, changed, omitted, or
+misunderstood an important part of the ORIGINAL USER TASK,
+explicitly identify the problem and provide a corrected
+interpretation when the available evidence supports one.
+
+Do not silently accept an incorrect Researcher conclusion.
+
+Do not silently change the ORIGINAL USER TASK to match the
+Researcher's findings.
+
+Do not execute tools directly.
+
+Do not perform the final execution stage.
+
+
+
+Before finalizing your analysis, explicitly verify that the available
+Researcher findings address the important elements of the ORIGINAL
+USER TASK.
+
+
+
+Your role is NOT to produce a general analysis report.
+
+
+
+Your role is to:
+
+
+
+Validate the Researcher's findings.
+
+Correct inaccurate or overly broad interpretations.
+
+Preserve important research information.
+
+Synthesize the validated evidence.
+
+Establish the defensible research gap supported by the evidence.
+
+Establish the potential novelty supported by the evidence.
+
+Produce finalized substantive content for the Executor.
+
+
+
+The Executor is responsible for producing the final user-facing
+deliverable.
+
+
+
+Do not produce the final user-facing research proposal or email.
+
+
+
+The Executor will use this validated content to produce the final
+deliverables requested by the ORIGINAL USER TASK.
 """
         print("Analyst prompt : ",prompt)
 

@@ -230,108 +230,126 @@ class CoordinatorAgent:
     # PLAN CREATION
     # ============================================================
 
-    def create_plan(
-        self,
-        task
-    ):
+    def create_plan(self, task):
 
         if not task or not str(task).strip():
-
             raise ValueError(
                 "Coordinator cannot create a plan "
                 "for an empty task."
             )
 
-        task = str(
-            task
-        ).strip()
+        task = str(task).strip()
 
         memories = self.recall(
             query=task,
             top_k=3
         )
 
-        memory_context = self._format_memories(
-            memories
-        )
+        memory_context = self._format_memories(memories)
 
         prompt = f"""
-You are the Coordinator agent in a multi-agent system.
+    You are the Coordinator agent in a multi-agent system.
 
-Your responsibility is to decompose the user's task into
-exactly three clear stages:
+    Your responsibility is to intelligently decompose the user's
+    task into exactly three role-specific assignments:
 
-1. research
-2. analysis
-3. execution
+    1. Researcher
+    2. Analyst
+    3. Executor
 
-The three stages must be distinct and logically connected.
+    You must understand the semantic meaning of the user's task.
+    Do NOT split the task using keywords, regular expressions,
+    sentence positions, or arbitrary text segments.
 
-The Research stage should identify what information needs
-to be investigated.
+    The three agents have different responsibilities.
 
-The Analysis stage should explain what should be evaluated,
-compared, interpreted, or verified based on the research.
+    RESEARCHER:
+    Investigates information required to answer the user's task.
+    The Researcher should identify relevant evidence, sources,
+    facts, concepts, methods, limitations, and open questions.
 
-The Execution stage should specify what final response,
-recommendation, result, or action should be produced based
-on the analysis.
+    ANALYST:
+    Evaluates the Researcher's findings against the ORIGINAL USER
+    TASK. The Analyst must determine whether the findings actually
+    address the original objective, identify gaps, compare or
+    interpret evidence, and develop the required conclusions.
 
-Important rules:
+    EXECUTOR:
+    Uses the validated analysis to produce the final deliverable
+    requested by the user.
 
-- Return ONLY valid JSON.
-- Do not include explanations before or after the JSON.
-- Do not use Markdown code fences.
-- Do not invent budgets, costs, timelines, staffing,
-  resources, citations, or implementation estimates unless
-  the user's task explicitly requests them.
-- Base the plan primarily on the user's original task.
-- Keep all three stages directly relevant to the task.
-- Research, analysis, and execution must not be duplicates.
-- Previous memory may provide context, but it must not
-  override the user's current task.
-- Do not perform the research yourself.
-- Do not perform the analysis yourself.
-- Do not produce the final answer.
+    IMPORTANT:
 
-Previous Coordinator memories:
+    - Preserve the original user objective.
+    - Preserve important domain terms, research topics,
+    constraints, requested methods, and requested deliverables.
+    - Do not replace the user's research topic with a related topic.
+    - Do the task decomposition carefully while preserving the original context.
+    - Ensure that each agent know for why they work on this sub task.
+    - When you tell work on given topic/given object/given task/given person to any of agent, clearly state to each agent what is that given topic/object/task/person is.
+    - Each agent should know what is the objective of the task they are working on.
+    - Do not assume that a Researcher's output defines the task.
+    - The original user task is the authoritative task definition.
+    - Each downstream assignment must remain traceable to the
+    original task.
+    - The Analyst must explicitly evaluate whether Researcher
+    findings remain aligned with the original task.
+    - The Executor must preserve the original task objective when
+    producing the final result.
+    - Previous memory may provide supporting context but MUST NOT
+    override the current user task.
+    - Do not perform the research yourself.
+    - Do not perform the analysis yourself.
+    - Do not produce the final answer.
 
-{memory_context}
+    For each stage, provide:
 
-Required JSON structure:
+    - objective
+    - tasks
+    - required_output
 
-{{
-    "research": "Research task",
-    "analysis": "Analysis task",
-    "execution": "Execution task"
-}}
+    Return ONLY valid JSON.
 
-User task:
+    Required JSON structure:
 
-{task}
-"""
+    {{
+        "research": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }},
+        "analysis": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }},
+        "execution": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }}
+    }}
 
-        response = self.llm.invoke(
-            prompt
-        )
+    Previous Coordinator memories:
+
+    {memory_context}
+
+    ORIGINAL USER TASK:
+
+    {task}
+    """
+
+        response = self.llm.invoke(prompt)
 
         content = response.content.strip()
 
-        # --------------------------------------------------------
-        # First parsing attempt
-        # --------------------------------------------------------
-
         try:
-
-            plan = self._parse_plan(
-                content
-            )
+            plan = self._parse_plan(content)
 
             self.remember(
                 content=(
-                    f"Created execution plan for task: "
-                    f"{task}\n"
-                    f"Plan: {plan}"
+                    f"Created semantic execution plan for task: "
+                    f"{task}\nPlan: {plan}"
                 ),
                 importance=7,
                 metadata={
@@ -341,81 +359,69 @@ User task:
 
             return plan
 
-        except (
-            json.JSONDecodeError,
-            ValueError
-        ):
+        except (json.JSONDecodeError, ValueError):
 
             print(
                 "\n[Coordinator] Invalid structured output "
                 "received. Retrying..."
             )
 
-        # --------------------------------------------------------
-        # Retry / structured-output repair
-        # --------------------------------------------------------
+            repair_prompt = f"""
+    You are the Coordinator agent.
 
-        repair_prompt = f"""
-You are the Coordinator agent.
+    Your previous response was invalid.
 
-Your previous response did not satisfy the required
-JSON format.
+    Create a valid semantic task decomposition without losing context for the
+ORIGINAL USER TASK below.
 
-Generate the task decomposition again.
+    Do not split the task using regex or text positions.
+    Do the task decomposition carefully while preserving the original context.
+    Ensure that each agent know for why they work on this sub task.
+    When you tell work on given topic/given object/given task/given person to any of agent, clearly state to each agent what is that given topic/object/task/person is.
+    Each agent should know what is the objective of the task they are working on.
 
-You MUST return ONLY valid JSON.
+    Return ONLY valid JSON using exactly this structure:
 
-Do not include Markdown.
-Do not include explanations.
-Do not include text before or after the JSON.
+    {{
+        "research": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }},
+        "analysis": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }},
+        "execution": {{
+            "objective": "...",
+            "tasks": ["...", "..."],
+            "required_output": "..."
+        }}
+    }}
 
-The JSON must contain exactly these three required
-fields:
+    The assignments must remain semantically aligned with the
+    original user task.
 
-{{
-    "research": "Research task",
-    "analysis": "Analysis task",
-    "execution": "Execution task"
-}}
+    Original user task:
 
-Rules:
+    {task}
 
-- Research identifies information that needs to be
-  investigated.
-- Analysis evaluates or interprets the research.
-- Execution produces the requested final result or action.
-- Keep the three stages distinct.
-- Do not invent requirements that are not present in
-  the original task.
+    Previous invalid response:
 
-Original user task:
+    {content}
+    """
 
-{task}
+            response = self.llm.invoke(repair_prompt)
 
-Previous invalid response:
+            retry_content = response.content.strip()
 
-{content}
-"""
-
-        response = self.llm.invoke(
-            repair_prompt
-        )
-
-        retry_content = (
-            response.content.strip()
-        )
-
-        try:
-
-            plan = self._parse_plan(
-                retry_content
-            )
+            plan = self._parse_plan(retry_content)
 
             self.remember(
                 content=(
-                    f"Created execution plan after retry "
-                    f"for task: {task}\n"
-                    f"Plan: {plan}"
+                    f"Created semantic execution plan after retry "
+                    f"for task: {task}\nPlan: {plan}"
                 ),
                 importance=7,
                 metadata={
@@ -424,18 +430,6 @@ Previous invalid response:
             )
 
             return plan
-
-        except (
-            json.JSONDecodeError,
-            ValueError
-        ):
-
-            raise ValueError(
-                "Coordinator failed to produce a valid "
-                "plan after retry.\n\n"
-                f"First response:\n{content}\n\n"
-                f"Retry response:\n{retry_content}"
-            )
 
     # ============================================================
     # PLAN PARSING
@@ -550,9 +544,17 @@ Previous invalid response:
             "execution"
         ]
 
+        required_stage_keys = [
+            "objective",
+            "tasks",
+            "required_output"
+        ]
+
         # --------------------------------------------------------
         # Required fields
         # --------------------------------------------------------
+        # Each stage is a nested object with objective/tasks/
+        # required_output, as requested by the prompt schema.
 
         for field in required_fields:
 
@@ -563,20 +565,54 @@ Previous invalid response:
                     f"required field: {field}"
                 )
 
+            stage = plan[field]
+
             if not isinstance(
-                plan[field],
-                str
+                stage,
+                dict
             ):
 
                 raise ValueError(
                     f"Coordinator field '{field}' "
-                    f"must be a string."
+                    f"must be an object."
                 )
 
-            if not plan[field].strip():
+            for key in required_stage_keys:
+
+                if key not in stage:
+
+                    raise ValueError(
+                        f"Coordinator field '{field}' "
+                        f"is missing required key: {key}"
+                    )
+
+            if not isinstance(
+                stage["objective"],
+                str
+            ) or not stage["objective"].strip():
 
                 raise ValueError(
-                    f"Coordinator field '{field}' "
+                    f"Coordinator field '{field}.objective' "
+                    f"cannot be empty."
+                )
+
+            if (
+                not isinstance(stage["tasks"], list)
+                or not stage["tasks"]
+            ):
+
+                raise ValueError(
+                    f"Coordinator field '{field}.tasks' "
+                    f"must be a non-empty list."
+                )
+
+            if not isinstance(
+                stage["required_output"],
+                str
+            ) or not stage["required_output"].strip():
+
+                raise ValueError(
+                    f"Coordinator field '{field}.required_output' "
                     f"cannot be empty."
                 )
 
@@ -585,9 +621,9 @@ Previous invalid response:
         # --------------------------------------------------------
 
         normalized = [
-            plan["research"].strip().lower(),
-            plan["analysis"].strip().lower(),
-            plan["execution"].strip().lower()
+            plan["research"]["objective"].strip().lower(),
+            plan["analysis"]["objective"].strip().lower(),
+            plan["execution"]["objective"].strip().lower()
         ]
 
         if (
@@ -601,6 +637,7 @@ Previous invalid response:
                 "research, analysis, and execution stages."
             )
 
+        print(plan)
         return plan
 
     # ============================================================

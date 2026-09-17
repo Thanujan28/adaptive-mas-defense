@@ -2179,9 +2179,12 @@ class MASEnvironment:
         # =====================================================
         # ANALYST RUN
         # =====================================================
+        task = state["task"]
 
         analysis_result = (
             self.analyst.run(
+                task,
+
                 analysis_instruction,
 
                 research,
@@ -2439,9 +2442,12 @@ class MASEnvironment:
         # =====================================================
         # EXECUTOR RUN
         # =====================================================
+        task = state["task"]
 
         execution_result = (
             self.executor.run(
+                task,
+                
                 execution_instruction,
 
                 analysis,

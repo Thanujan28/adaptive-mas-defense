@@ -669,41 +669,34 @@ approved tool pipeline.
 2. Use the supplied external search results as the
    primary evidence when they are available.
 
-3. Distinguish actual source evidence from your own
-   general/background knowledge.
+3. Do NOT invent papers.
 
-4. Do NOT invent papers.
+4. Do NOT invent authors.
 
-5. Do NOT invent authors.
+5. Do NOT invent URLs.
 
-6. Do NOT invent URLs.
+6. Do NOT invent DOIs.
 
-7. Do NOT invent DOIs.
+7. Do NOT invent statistics.
 
-8. Do NOT invent statistics.
-
-9. Do NOT claim that an Internet search was performed
+8. Do NOT claim that an Internet search was performed
    unless actual external search results are provided.
 
-10. Do NOT claim that a source contains information that
+9. Do NOT claim that a source contains information that
     is not present in the supplied source content.
 
-11. If a source could not be collected, clearly indicate
+10. If a source could not be collected, clearly indicate
     that its content was unavailable.
 
-12. Do not treat pretrained knowledge as real-time
+11. Do not treat pretrained knowledge as real-time
     Internet information.
 
-13. If the available evidence is insufficient, explicitly
+12. If the available evidence is insufficient, explicitly
     state the evidence gap.
 
-14. Do not silently replace missing evidence with invented
+13. Do not silently replace missing evidence with invented
     facts.
-
-15. Do not create a new task.
-
-16. Do not ignore the Coordinator's assignment.
-
+    
 17. Produce a research report that clearly separates:
        - verified source-based findings
        - limitations/evidence gaps
@@ -712,7 +705,8 @@ approved tool pipeline.
 18. Preserve important factual details from the collected
     sources so that the Analyst can evaluate them later.
 
-Produce the research report for the Coordinator.
+Produce the full compiled research report for the Coordinator.
+
 """
         print("Researcher prompt:\n", prompt)
         response = self.llm.invoke(

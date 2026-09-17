@@ -282,6 +282,7 @@ class ExecutorAgent:
 
     def run(
         self,
+        task: str,
         execution_instruction: str,
         analysis: str,
         tool_results=None
@@ -348,6 +349,8 @@ class ExecutorAgent:
         prompt = f"""
 You are the Executor agent in a multi-agent research
 system.
+
+Original user prompt : {task}
 
 The Coordinator has assigned you the following
 execution task:
