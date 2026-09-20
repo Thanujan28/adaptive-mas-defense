@@ -60,6 +60,7 @@ RESEARCHER_ASSIGNMENT_TEMPLATE = (
     "supported by the collected sources. Do not skip a "
     "sub-topic. Do NOT write the proposal. Output goes to "
     "the Executor.\n\n"
+    "OUTLINE TO RESEARCH:\n"
 )
 
 ANALYST_ASSIGNMENT_TEMPLATE = (
