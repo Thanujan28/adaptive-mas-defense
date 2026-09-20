@@ -30,6 +30,20 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _as_text(value) -> str:
+    # Normalise an arbitrary value into stripped text.
+    #
+    # Strings are stripped directly; other values (e.g. dict/list
+    # structured outputs) are rendered with str() so the semantic
+    # assessor always operates on text.
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
 @dataclass
 class SemanticAssessment:
     """
@@ -234,9 +248,12 @@ class SemanticAssessor:
         the "subtask" axis stays well defined.
         """
 
-        original_task = (original_task or "").strip()
-        assigned_subtask = (assigned_subtask or "").strip()
-        agent_output = (agent_output or "").strip()
+        # Agent outputs may arrive as non-string content (e.g. a
+        # structured plan dict). Coerce to text so the embedding call
+        # never receives a non-string.
+        original_task = _as_text(original_task)
+        assigned_subtask = _as_text(assigned_subtask)
+        agent_output = _as_text(agent_output)
 
         # -----------------------------------------------------
         # Empty output is a definite deviation.

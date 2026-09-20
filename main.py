@@ -1,8 +1,13 @@
 from environment.mas_environment import MASEnvironment
 from attacks.prompt_infection import PromptInfectionAttack
-
+from security.logging_config import enable_security_logging
 
 def main():
+
+    # Turn on the security_state logs. Without this the observer's
+    # records are emitted but silently dropped, because nothing
+    # configures the security.observer logger.
+    enable_security_logging()
 
     print("=" * 60)
     print("Adaptive MAS Defense - Prompt Infection Test")
@@ -51,14 +56,79 @@ def main():
     print(result)
 
     # ---------------------------------------------------------
-    # SHOW EVENTS
+    # SECURITY STATE ASSESSMENT PER AGENT
+    #
+    # Every agent response was observed before it was forwarded
+    # (see publish_agent_result). Print the resulting assessment
+    # for each agent, then the episode aggregate used by the PPO
+    # security state.
     # ---------------------------------------------------------
 
-    print("\nRecorded MAS events:")
+    print_security_assessments(environment)
+
+    # ---------------------------------------------------------
+    # SHOW OBSERVABLE EVENTS
+    # ---------------------------------------------------------
+
+    print("\nRecorded observable events:")
     print("-" * 60)
 
-    for event in environment.get_events():
+    for event in environment.get_observable_events():
         print(event)
+
+
+def print_security_assessments(environment):
+    # Print the per-agent security assessment and the episode aggregate.
+
+    observations = environment.security_observations
+    print("\n" + "=" * 60)
+    print(f"SECURITY STATE ASSESSMENT ({len(observations)} agent responses)")
+    print("=" * 60)
+
+    if not observations:
+        print("  (no agent responses were observed)")
+
+    for index, observation in enumerate(observations, start=1):
+
+        assessment = observation.semantic_assessment
+        detector = observation.detector_result
+        print(f"\n[{index}] agent={observation.agent_id} "
+              f"subtask={observation.assigned_subtask!r}")
+
+        if assessment is None or not assessment.assessed:
+            print("    semantic   : (not assessed)")
+        else:
+            print(
+                f"    semantic   : "
+                f"task_sim={assessment.task_similarity:.4f} "
+                f"subtask_sim={assessment.subtask_similarity:.4f} "
+                f"deviation={assessment.deviation_score:.4f} "
+                f"confidence={assessment.confidence:.4f}"
+            )
+
+        print(
+            f"    evidence   : "
+            f"present={detector.get('evidence_present')} "
+            f"injection={detector.get('injection_evidence_count')} "
+            f"high_conf={detector.get('high_confidence_evidence_count')} "
+            f"untrusted={detector.get('untrusted_source_evidence_count')}"
+        )
+
+        print(
+            f"    score      : "
+            f"security_score={observation.security_score:.4f} "
+            f"investigate={observation.investigation_required}"
+        )
+
+    aggregate = environment.get_semantic_assessment()
+
+    print("\n" + "-" * 60)
+    print("EPISODE SEMANTIC AGGREGATE (worst-deviation rule)")
+    print("-" * 60)
+    print(f"    assessed        = {aggregate.assessed}")
+    print(f"    task_similarity = {aggregate.task_similarity:.4f}")
+    print(f"    deviation_score = {aggregate.deviation_score:.4f}")
+    print(f"    confidence      = {aggregate.confidence:.4f}")
 
 
 if __name__ == "__main__":

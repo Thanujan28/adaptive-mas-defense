@@ -1,35 +1,79 @@
+"""
+Observable-evidence detector for the MAS security state.
+
+This detector does NOT read simulator attack labels. It produces
+evidence from observable content and behaviour only:
+
+  * content evidence (prompt-injection style phrasing, unexpected
+    URLs/emails/commands) via security.content_detector,
+  * behavioural signals (tool timeouts, tool-call volume, message
+    relay fan-out, memory writes from untrusted sources, per-agent
+    token spikes).
+
+``evidence_present`` is True when content/behaviour evidence is
+present. It is NOT a claim that the system is compromised.
+"""
+
 from __future__ import annotations
 
 from collections import Counter
-from typing import Iterable, Mapping, Any
+from typing import Any, Iterable, Mapping
+
+from .content_detector import (
+    ContentEvidence,
+    detect_content_evidence,
+)
 
 
 class SecurityDetector:
     """
-    Lightweight rule-based detector for the MAS security state.
+    Lightweight observable-evidence detector for the MAS security
+    state.
 
-    This detector does not claim that an agent is compromised.
-    It produces observable evidence that can be consumed by the
-    semantic assessor and PPO state builder.
+    Evidence is derived from content and behaviour, never from
+    simulator ground truth.
     """
-
-    ATTACK_EVENT_TYPES = {
-        "attack",
-        "external_result_injection",
-        "prompt_injection",
-        "memory_poisoning",
-        "suspicious_tool_result",
-    }
 
     MESSAGE_EVENT_TYPES = {
         "message",
         "message_relay",
     }
 
+    # Tool-event types that count toward tool-call volume.
+    TOOL_CALL_EVENT_TYPES = {
+        "tool_request",
+        "tool_execution",
+    }
+
+    TIMEOUT_EVENT_TYPES = {
+        "tool_timeout",
+        "timeout",
+    }
+
+    # Trusted local sources. Memory writes from anything else are
+    # treated as coming from an untrusted/external source.
+    TRUSTED_SOURCES = {
+        "coordinator",
+        "outline",
+        "researcher",
+        "analyst",
+        "executor",
+        "environment",
+    }
+
     def detect(
         self,
         events: Iterable[Mapping[str, Any]],
-    ) -> dict[str, float | int | bool | list[str]]:
+        tool_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Compute observable content and behaviour evidence.
+
+        Returns counts plus ``evidence_present`` (with a deprecated
+        ``detected`` alias) and the agent ids that triggered content
+        evidence (``affected_agents``).
+        """
+
         events = list(events)
 
         event_types = Counter(
@@ -37,52 +81,186 @@ class SecurityDetector:
             for event in events
         )
 
-        attack_events = [
-            event
-            for event in events
-            if event.get("event_type") in self.ATTACK_EVENT_TYPES
-        ]
+        # -----------------------------------------------------
+        # Content evidence
+        # -----------------------------------------------------
 
-        timeout_count = sum(
-            1
-            for event in events
-            if event.get("event_type") in {
-                "tool_timeout",
-                "timeout",
-            }
+        content: ContentEvidence = detect_content_evidence(
+            events
         )
 
-        suspicious_events = sum(
+        injection_evidence_count = content.category_counts.get(
+            "instruction_override",
+            0,
+        )
+
+        # -----------------------------------------------------
+        # Behavioural evidence
+        # -----------------------------------------------------
+
+        timeout_count = sum(
+            event_types[event_type]
+            for event_type in self.TIMEOUT_EVENT_TYPES
+        )
+
+        tool_call_count = sum(
+            event_types[event_type]
+            for event_type in self.TOOL_CALL_EVENT_TYPES
+        )
+
+        relay_count = event_types["message_relay"]
+
+        message_count = sum(
+            event_types[event_type]
+            for event_type in self.MESSAGE_EVENT_TYPES
+        )
+
+        # Relay fan-out: relays beyond a normal single hop.
+        relay_fanout = max(0, relay_count - message_count)
+
+        # Memory writes from untrusted / external sources.
+        untrusted_source_evidence_count = sum(
             1
             for event in events
-            if event.get("suspicious") is True
+            if event.get("event_type") == "memory_write"
+            and event.get("sender") not in self.TRUSTED_SOURCES
+        )
+
+        # Per-agent token spikes.
+        tokens_by_agent: dict[str, int] = {}
+        for event in events:
+
+            usage = event.get("token_usage") or 0
+            agent = event.get("sender") or event.get("agent_id")
+
+            if agent and usage:
+                tokens_by_agent[agent] = (
+                    tokens_by_agent.get(agent, 0) + int(usage)
+                )
+
+        token_spike_count = self._count_token_spikes(
+            tokens_by_agent
+        )
+
+        # Tool-call volume spike vs budget.
+        tool_volume_spike = 0
+        if tool_limit:
+            tool_volume_spike = int(
+                tool_call_count > tool_limit
+            )
+
+        # -----------------------------------------------------
+        # Agents that triggered content evidence
+        # -----------------------------------------------------
+
+        affected_agents = {
+            event.get("sender") or event.get("agent_id")
+            for event in events
+            if self._event_has_content_evidence(event)
+        }
+        affected_agents.discard(None)
+
+        # -----------------------------------------------------
+        # evidence_present
+        # -----------------------------------------------------
+
+        evidence_present = bool(
+            content.total
+            or timeout_count
+            or untrusted_source_evidence_count
+            or token_spike_count
+            or tool_volume_spike
         )
 
         return {
-            "attack_count": len(attack_events),
-            "explicit_attack_count": sum(
-                1
-                for event in attack_events
-                if event.get("event_type") in {
-                    "attack",
-                    "prompt_injection",
-                    "memory_poisoning",
-                }
+            # Evidence counts (renamed from label-based features)
+            "injection_evidence_count": injection_evidence_count,
+            "high_confidence_evidence_count": content.high_confidence,
+            "untrusted_source_evidence_count": (
+                untrusted_source_evidence_count
             ),
-            "external_injection_count": event_types[
-                "external_result_injection"
-            ],
-            "suspicious_event_count": suspicious_events,
-            "message_count": sum(
-                event_types[event_type]
-                for event_type in self.MESSAGE_EVENT_TYPES
+            "content_evidence_count": content.total,
+            "content_category_counts": dict(
+                content.category_counts
             ),
-            "relay_count": event_types["message_relay"],
+
+            # Behavioural evidence
             "tool_timeout_count": timeout_count,
-            "detected": bool(attack_events or suspicious_events),
-            "attack_ids": [
-                event.get("request_id")
-                for event in attack_events
-                if event.get("request_id") is not None
-            ],
+            "tool_call_count": tool_call_count,
+            "relay_fanout": relay_fanout,
+            "token_spike_count": token_spike_count,
+            "tool_volume_spike": tool_volume_spike,
+
+            # Unexpected artefacts
+            "unexpected_url_count": content.url_count,
+            "unexpected_email_count": content.email_count,
+            "unexpected_command_count": content.command_count,
+
+            # Propagation / messaging
+            "message_count": message_count,
+            "relay_count": relay_count,
+
+            # Decision
+            "evidence_present": evidence_present,
+            "affected_agents": sorted(affected_agents),
+
+            # Deprecated alias kept for backward compatibility.
+            "detected": evidence_present,
         }
+
+    @staticmethod
+    def _count_token_spikes(
+        tokens_by_agent: Mapping[str, int],
+    ) -> int:
+        """
+        Count agents whose token usage is a strong outlier.
+
+        Uses a simple mean + 2 * std rule over observed agents. It is
+        a heuristic sensor, not ground truth.
+        """
+
+        values = list(tokens_by_agent.values())
+
+        if len(values) < 2:
+            return 0
+
+        mean = sum(values) / len(values)
+        variance = sum(
+            (value - mean) ** 2
+            for value in values
+        ) / len(values)
+        std = variance ** 0.5
+
+        if std == 0:
+            return 0
+
+        threshold = mean + 2 * std
+
+        return sum(
+            1
+            for value in values
+            if value > threshold
+        )
+
+    @staticmethod
+    def _event_has_content_evidence(
+        event: Mapping[str, Any],
+    ) -> bool:
+        """
+        True when this single event's content triggers evidence.
+        """
+
+        content = event.get("content")
+
+        if isinstance(content, Mapping):
+            content = content.get("content")
+
+        if not isinstance(content, str) or not content.strip():
+            content = event.get("memory_update")
+
+        if not isinstance(content, str) or not content.strip():
+            return False
+
+        return bool(
+            detect_content_evidence([{"content": content}]).total
+        )

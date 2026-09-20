@@ -47,8 +47,17 @@ class MASEvent:
     episode_id: Optional[str] = None
 
     result_count: int = 0
-
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Visibility channel of the event.
+    #
+    #   "observable"    -> evidence a real defender could see
+    #                      (content, behaviour, provenance)
+    #   "ground_truth"  -> simulator-only labels and markers that a
+    #                      real defender must NEVER see. Ground truth
+    #                      is allowed only for reward, evaluation and
+    #                      dataset labelling.
+    visibility: str = "observable"
 
     @classmethod
     def create(
@@ -64,6 +73,7 @@ class MASEvent:
         episode_id: Optional[str] = None,
         result_count: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
+        visibility: str = "observable",
     ):
         """
         Create a new MAS event.
@@ -87,6 +97,7 @@ class MASEvent:
             episode_id=episode_id,
             result_count=result_count,
             metadata=metadata or {},
+            visibility=visibility,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -107,4 +118,5 @@ class MASEvent:
             "episode_id": self.episode_id,
             "result_count": self.result_count,
             "metadata": self.metadata,
+            "visibility": self.visibility,
         }
