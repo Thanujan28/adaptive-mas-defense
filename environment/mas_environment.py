@@ -3379,6 +3379,7 @@ class MASEnvironment:
             assigned_subtask=assigned_subtask,
             events=[],
             artifacts=artifacts_for_agent,
+            tool_limit=self.tool_manager.tool_limit,
             metadata=metadata,
         )
 

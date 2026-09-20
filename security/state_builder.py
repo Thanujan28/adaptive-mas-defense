@@ -13,6 +13,7 @@ renamed.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from .detector import SecurityDetector
@@ -205,12 +206,18 @@ class SecurityStateBuilder:
         )
 
         # -----------------------------------------------------
-        # propagation_depth: derived from the observable
-        # message-relay chain (sender -> receiver hops), NOT from a
-        # simulator-written field.
+        # propagation_depth (P4 redefinition): the number of
+        # distinct agents reachable downstream, over the observable
+        # message graph, from an agent whose artifact carried content
+        # evidence. 0 when there is no evidence at all -- previously
+        # this was pure communication topology (identical in clean
+        # and attacked runs, P4).
         # -----------------------------------------------------
 
-        propagation_depth = self._propagation_depth(events)
+        propagation_depth = self._propagation_depth(
+            events,
+            affected_agents,
+        )
 
         investigation_count = sum(
             1
@@ -337,15 +344,22 @@ class SecurityStateBuilder:
     @staticmethod
     def _propagation_depth(
         events: Iterable[Mapping[str, Any]],
+        affected_agents: Iterable[str],
     ) -> int:
         """
-        Estimate propagation depth from the observable relay chain.
+        Number of distinct agents reachable downstream, over the
+        observable message graph, from an agent whose artifact
+        carried content evidence (P4).
 
-        The chain is reconstructed from ``message`` / ``message_relay``
-        edges: each edge is (current hop sender -> next hop receiver).
-        Depth is the length of the longest path through these edges.
-        Returns 0 when no chain is present.
+        Returns 0 when ``affected_agents`` is empty -- with no
+        evidence there is nothing to propagate, so this is no longer
+        identical between clean and attacked runs (previously it was
+        pure communication topology, present regardless of evidence).
         """
+
+        affected_agents = set(affected_agents)
+        if not affected_agents:
+            return 0
 
         edges: list[tuple[str, str]] = []
 
@@ -363,32 +377,26 @@ class SecurityStateBuilder:
             if sender and receiver:
                 edges.append((sender, receiver))
 
-        if not edges:
-            return 0
-
-        # Longest simple path over the observed edges (small graphs).
         adjacency: dict[str, list[str]] = {}
         for sender, receiver in edges:
             adjacency.setdefault(sender, []).append(receiver)
 
-        best = 0
+        reachable: set[str] = set()
 
-        def walk(node: str, depth: int, seen: frozenset) -> None:
-            nonlocal best
-            best = max(best, depth)
-            for neighbour in adjacency.get(node, []):
-                if neighbour in seen:
-                    continue
-                walk(
-                    neighbour,
-                    depth + 1,
-                    seen | {neighbour},
-                )
+        for start in affected_agents:
 
-        for start in list(adjacency):
-            walk(start, 0, frozenset({start}))
+            visited = {start}
+            queue = deque([start])
 
-        return best
+            while queue:
+                node = queue.popleft()
+                for neighbour in adjacency.get(node, []):
+                    if neighbour not in visited:
+                        visited.add(neighbour)
+                        queue.append(neighbour)
+                        reachable.add(neighbour)
+
+        return len(reachable)
 
     def vector(
         self,

@@ -110,6 +110,7 @@ class SecurityObserver:
         assigned_subtask: str = "",
         events: Optional[list[Mapping[str, Any]]] = None,
         artifacts: Optional[list[Mapping[str, Any]]] = None,
+        tool_limit: Optional[int] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> Observation:
         """
@@ -149,6 +150,11 @@ class SecurityObserver:
 
         metadata:
             Additional provenance information.
+
+        tool_limit:
+            Optional tool-call budget (P4), forwarded to the detector
+            so ``tool_volume_spike`` can be computed from this path
+            too, not only from ``SecurityStateBuilder.build``.
         """
 
         events = list(events or [])
@@ -176,6 +182,7 @@ class SecurityObserver:
             events,
             artifacts=artifacts,
             response=response,
+            tool_limit=tool_limit,
         )
 
         # ---------------------------------------------------------
