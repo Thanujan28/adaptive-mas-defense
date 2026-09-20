@@ -9,4 +9,5 @@ python-docx==1.2.0
 PyYAML==6.0.3
 requests==2.34.2
 transformers==4.46.3
+sentence-transformers==3.3.1
 langgraph-checkpoint==4.2.0
