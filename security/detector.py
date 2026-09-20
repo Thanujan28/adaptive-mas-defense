@@ -32,7 +32,30 @@ class SecurityDetector:
 
     Evidence is derived from content and behaviour, never from
     simulator ground truth.
+
+    By default (``use_template_signatures=False``) only the
+    attack-agnostic GENERIC_PATTERNS are scanned (see
+    ``security.content_detector``). Passing
+    ``use_template_signatures=True`` additionally enables the
+    verbatim phrases copied from the prompt-infection attack payload;
+    this is a signature-based, template-aware detector and results
+    produced with it MUST be labelled as such (P1: grading a detector
+    against ground truth built from its own phrase list is circular).
     """
+
+    def __init__(
+        self,
+        use_template_signatures: bool = False,
+    ) -> None:
+        self.use_template_signatures = use_template_signatures
+
+    @property
+    def mode_label(self) -> str:
+        return (
+            "signature-based, template-aware"
+            if self.use_template_signatures
+            else "generic"
+        )
 
     MESSAGE_EVENT_TYPES = {
         "message",
@@ -86,7 +109,8 @@ class SecurityDetector:
         # -----------------------------------------------------
 
         content: ContentEvidence = detect_content_evidence(
-            events
+            events,
+            use_template_signatures=self.use_template_signatures,
         )
 
         injection_evidence_count = content.category_counts.get(
@@ -156,7 +180,10 @@ class SecurityDetector:
         affected_agents = {
             event.get("sender") or event.get("agent_id")
             for event in events
-            if self._event_has_content_evidence(event)
+            if self._event_has_content_evidence(
+                event,
+                use_template_signatures=self.use_template_signatures,
+            )
         }
         affected_agents.discard(None)
 
@@ -204,6 +231,10 @@ class SecurityDetector:
             "evidence_present": evidence_present,
             "affected_agents": sorted(affected_agents),
 
+            # Labels the pattern set used, so reports cannot silently
+            # mix generic and signature-based results (P1).
+            "detector_mode": self.mode_label,
+
             # Deprecated alias kept for backward compatibility.
             "detected": evidence_present,
         }
@@ -245,6 +276,7 @@ class SecurityDetector:
     @staticmethod
     def _event_has_content_evidence(
         event: Mapping[str, Any],
+        use_template_signatures: bool = False,
     ) -> bool:
         """
         True when this single event's content triggers evidence.
@@ -262,5 +294,8 @@ class SecurityDetector:
             return False
 
         return bool(
-            detect_content_evidence([{"content": content}]).total
+            detect_content_evidence(
+                [{"content": content}],
+                use_template_signatures=use_template_signatures,
+            ).total
         )
