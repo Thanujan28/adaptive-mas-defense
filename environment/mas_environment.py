@@ -3630,6 +3630,11 @@ class MASEnvironment:
                         "by the Prompt Infection path."
                     ),
 
+                    # P7: this event only ever exists to record
+                    # simulator/attack configuration; it must never
+                    # reach the defender's observable channel.
+                    visibility="ground_truth",
+
                     metadata={
                         "attack_type":
                             "prompt_infection",
@@ -3874,8 +3879,12 @@ class MASEnvironment:
                 self.topology_name,
 
             "metadata": {
-                "external_injection":
-                    True,
+                # P7: neutral provenance marker. Renamed from
+                # "external_injection" (contained attack vocabulary)
+                # -- the sender field "external_source" already
+                # identifies the provenance.
+                "provenance":
+                    "external_source",
 
                 **(
                     metadata
@@ -3903,8 +3912,8 @@ class MASEnvironment:
                     receiver="shared_pool",
 
                     content=(
-                        f"External content injected "
-                        f"for {receiver}"
+                        f"message from external_source "
+                        f"to {receiver}"
                     ),
 
                     metadata={
@@ -3922,8 +3931,8 @@ class MASEnvironment:
                                 content
                             ),
 
-                        "external_injection":
-                            True,
+                        "provenance":
+                            "external_source",
 
                         **(
                             metadata
@@ -3952,8 +3961,8 @@ class MASEnvironment:
                     receiver=receiver,
 
                     content=(
-                        f"External content injected "
-                        f"for {receiver}"
+                        f"message from external_source "
+                        f"to {receiver}"
                     ),
 
                     metadata={
@@ -3975,8 +3984,8 @@ class MASEnvironment:
                                 ]
                             ),
 
-                        "external_injection":
-                            True,
+                        "provenance":
+                            "external_source",
 
                         **(
                             metadata
