@@ -150,6 +150,35 @@ class SecurityStateBuilder:
 
         strict:
             When True (default), reject any ground-truth leakage.
+
+        P5 aggregation rules (this builder is intentionally
+        EPISODE-level, aggregating over every agent's responses so
+        far, unlike ``SecurityObserver.observe`` which scores a
+        single response):
+
+          * evidence counts (``injection_evidence_count``,
+            ``high_confidence_evidence_count``,
+            ``untrusted_source_evidence_count``,
+            ``unexpected_url_count``/``_email_count``/
+            ``_command_count``) are summed over unique artifacts
+            across the whole episode (an artifact is scanned once
+            each, regardless of how many agents later read the same
+            memory);
+          * ``affected_agent_count`` / ``propagation_depth`` are
+            derived from the set of distinct receivers whose
+            artifacts carried evidence (episode-wide, not per
+            response);
+          * ``semantic_*`` fields reflect the assessment passed in by
+            the caller for the CURRENT step (typically the
+            worst-of-episode deviation tracked by
+            ``MASEnvironment.get_semantic_assessment``), not an
+            average -- a single strongly deviating response should
+            not be diluted by many benign ones;
+          * ``tokens_used``/``tools_used``/``memory_count`` are
+            episode-cumulative resource counters;
+          * ``investigation_count``/``containment_count``/
+            ``resource_allocation_count`` count defensive actions
+            taken so far this episode.
         """
 
         events = list(events)

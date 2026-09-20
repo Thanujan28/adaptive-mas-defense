@@ -16,13 +16,17 @@ present. It is NOT a claim that the system is compromised.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from typing import Any, Iterable, Mapping
 
 from .content_detector import (
+    STRICT_CATEGORIES,
     ContentEvidence,
     detect_artifact_evidence,
     detect_content_evidence,
+    introduced_urls,
+    scan_text,
 )
 
 
@@ -90,6 +94,7 @@ class SecurityDetector:
         events: Iterable[Mapping[str, Any]],
         tool_limit: int | None = None,
         artifacts: Iterable[Mapping[str, Any]] | None = None,
+        response: str | None = None,
     ) -> dict[str, Any]:
         """
         Compute observable content and behaviour evidence.
@@ -101,6 +106,18 @@ class SecurityDetector:
         stored in ``events``. When omitted, falls back to scanning
         the ``content``/``memory_update`` fields of ``events``
         (legacy path, mostly a no-op since those fields are summaries).
+
+        ``response`` (P5), when given, is scanned directly as the
+        agent's own output. It is agent-generated prose, so only
+        ``STRICT_CATEGORIES`` (instruction_override, role_reassignment)
+        are applied to it -- the stronger exfiltration/imperative
+        categories are reserved for untrusted artifacts (P4). To avoid
+        double counting, ``response`` is skipped when its text is
+        byte-identical to one of the supplied ``artifacts`` (e.g. the
+        response was itself logged as a memory-write artifact).
+        ``unexpected_url_count`` becomes the number of URLs in
+        ``response`` that do not appear in any supplied artifact
+        (introduced URLs, P4) when ``response`` is given.
 
         Returns counts plus ``evidence_present`` (with a deprecated
         ``detected`` alias) and the agent ids that triggered content
@@ -145,6 +162,47 @@ class SecurityDetector:
                 if event.get("event_type") == "memory_write"
                 and event.get("sender") not in self.TRUSTED_SOURCES
             )
+
+        # -----------------------------------------------------
+        # Response evidence (P5): the agent's own output, scanned
+        # directly rather than relying on it appearing in `events`.
+        # -----------------------------------------------------
+
+        artifact_texts = [
+            artifact.get("text")
+            for artifact in (artifacts or [])
+            if isinstance(artifact.get("text"), str)
+        ]
+
+        if response and isinstance(response, str):
+
+            artifact_hashes = {
+                hashlib.sha256(text.encode("utf-8")).hexdigest()
+                for text in artifact_texts
+            }
+            response_hash = hashlib.sha256(
+                response.encode("utf-8")
+            ).hexdigest()
+
+            if response_hash not in artifact_hashes:
+
+                response_evidence = scan_text(
+                    response,
+                    use_template_signatures=self.use_template_signatures,
+                    categories=STRICT_CATEGORIES,
+                )
+
+                for category, count in response_evidence.category_counts.items():
+                    content.category_counts[category] = (
+                        content.category_counts.get(category, 0) + count
+                    )
+                content.high_confidence += response_evidence.high_confidence
+
+            unexpected_url_count = len(
+                introduced_urls(response, artifact_texts)
+            )
+        else:
+            unexpected_url_count = content.url_count
 
         injection_evidence_count = content.category_counts.get(
             "instruction_override",
@@ -253,7 +311,7 @@ class SecurityDetector:
             "tool_volume_spike": tool_volume_spike,
 
             # Unexpected artefacts
-            "unexpected_url_count": content.url_count,
+            "unexpected_url_count": unexpected_url_count,
             "unexpected_email_count": content.email_count,
             "unexpected_command_count": content.command_count,
 

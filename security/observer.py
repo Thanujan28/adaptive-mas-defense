@@ -133,12 +133,19 @@ class SecurityObserver:
 
         events:
             Security/runtime events associated with the response.
+            P5: this should be scoped to the current step (e.g. []),
+            not the cumulative episode log -- ``response`` and
+            ``artifacts`` are the primary per-response evidence
+            sources; ``events`` only contributes behavioural counts
+            (tool timeouts, relay fan-out, ...).
 
         artifacts:
-            Observable artifacts (P2): the actual text delivered to
-            agents via tool results, messages and memory writes. When
-            given, the detector scans these instead of the compact
-            event summaries.
+            Observable artifacts delivered to THIS agent for THIS
+            response (P2/P5): tool results, messages and memory
+            writes actually received by ``agent_id`` in this step,
+            not the whole episode's artifacts. The detector scans
+            these plus ``response`` itself (deduped by text hash so
+            the same text is never counted twice).
 
         metadata:
             Additional provenance information.
@@ -157,24 +164,19 @@ class SecurityObserver:
         assert_no_ground_truth(events, artifacts=artifacts)
 
         # ---------------------------------------------------------
-        # 1. Add the response itself as an observation event
+        # 1. Cheap rule-based detection, scoped to this response
+        #    (P5): the response text is scanned directly here rather
+        #    than depending on it being logged into `events` in the
+        #    right order beforehand -- correctness no longer depends
+        #    on log ordering, and an empty `events` list still
+        #    detects an injected response.
         # ---------------------------------------------------------
 
-        response_event = {
-            "event_type": "agent_response",
-            "agent_id": agent_id,
-            "response": response,
-            "original_task": original_task,
-            "assigned_subtask": assigned_subtask,
-        }
-
-        events.append(response_event)
-
-        # ---------------------------------------------------------
-        # 2. Cheap rule-based detection
-        # ---------------------------------------------------------
-
-        detector_result = self.detector.detect(events, artifacts=artifacts)
+        detector_result = self.detector.detect(
+            events,
+            artifacts=artifacts,
+            response=response,
+        )
 
         # ---------------------------------------------------------
         # 3. Semantic assessment

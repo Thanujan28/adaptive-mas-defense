@@ -3359,13 +3359,26 @@ class MASEnvironment:
             else "fallback_task"
         )
 
+        # P5: score using only per-response evidence -- the response
+        # text itself (scanned directly by the detector) and the
+        # artifacts actually delivered TO this agent, never the
+        # cumulative episode log. This prevents an earlier infected
+        # agent's evidence from inflating every later agent's score,
+        # and means detection no longer depends on event-log
+        # ordering.
+        artifacts_for_agent = [
+            artifact
+            for artifact in self.get_observable_artifacts()
+            if artifact.get("receiver") == agent_id
+        ]
+
         observation = self.security_observer.observe(
             agent_id=agent_id,
             response=response,
             original_task=original_task,
             assigned_subtask=assigned_subtask,
-            events=self.get_observable_events(),
-            artifacts=self.get_observable_artifacts(),
+            events=[],
+            artifacts=artifacts_for_agent,
             metadata=metadata,
         )
 

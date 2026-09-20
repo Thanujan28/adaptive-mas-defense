@@ -41,6 +41,7 @@ class PPOEnvironment:
         }
         return self.state_builder.build(
             self.mas_environment.get_observable_events(),
+            artifacts=self.mas_environment.get_observable_artifacts(),
             semantic=self.mas_environment.get_semantic_assessment(),
             resource_state=self.mas_environment.get_resource_state(),
             memory_counts=memory_counts,
