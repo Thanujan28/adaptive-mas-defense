@@ -295,6 +295,11 @@ def detect_content_evidence(
 
     Only the content-carrying fields are inspected, so ground-truth
     metadata (which must not be present anyway) is irrelevant here.
+
+    Deprecated in favour of ``detect_artifact_evidence``: observable
+    events only carry summaries ("Tool X completed successfully"),
+    so this rarely finds anything (P2). Kept for callers that have
+    not been migrated to the artifact channel yet.
     """
 
     total = ContentEvidence()
@@ -320,3 +325,86 @@ def detect_content_evidence(
         )
 
     return total
+
+
+# Sources whose delivered artifacts are treated as untrusted: tools
+# that fetch external content, and messages explicitly tagged as
+# coming from outside the trusted agent set.
+UNTRUSTED_ARTIFACT_SOURCES = frozenset(
+    {
+        "internet_search",
+        "academic_search",
+        "external_source",
+    }
+)
+
+
+def detect_artifact_evidence(
+    artifacts: Iterable[Mapping[str, Any]],
+    allowed_urls: Iterable[str] | None = None,
+    use_template_signatures: bool = False,
+) -> tuple[ContentEvidence, int, dict[str, ContentEvidence]]:
+    """
+    Aggregate content evidence over observable artifacts (P2): the
+    text an agent actually received for a tool result, message or
+    memory write.
+
+    Returns ``(evidence, untrusted_source_evidence_count,
+    evidence_by_receiver)`` where:
+
+      * ``evidence`` is the total ContentEvidence across all
+        artifacts;
+      * ``untrusted_source_evidence_count`` is the number of
+        untrusted-source artifacts (external tool results,
+        ``external_source`` messages -- see
+        ``UNTRUSTED_ARTIFACT_SOURCES``) whose text carries content
+        evidence. This replaces the old memory-write-sender heuristic
+        which was always 0 in practice;
+      * ``evidence_by_receiver`` maps receiver agent id to the
+        ContentEvidence found in artifacts delivered to them, used to
+        compute ``affected_agents``.
+    """
+
+    total = ContentEvidence()
+    untrusted_count = 0
+    evidence_by_receiver: dict[str, ContentEvidence] = {}
+
+    for artifact in artifacts:
+
+        text = artifact.get("text")
+
+        if not isinstance(text, str) or not text.strip():
+            continue
+
+        evidence = scan_text(
+            text,
+            allowed_urls=allowed_urls,
+            use_template_signatures=use_template_signatures,
+        )
+
+        for category, count in evidence.category_counts.items():
+            total.category_counts[category] = (
+                total.category_counts.get(category, 0) + count
+            )
+        total.high_confidence += evidence.high_confidence
+        total.url_count += evidence.url_count
+        total.email_count += evidence.email_count
+        total.command_count += evidence.command_count
+        total.matched_examples.extend(evidence.matched_examples)
+
+        source = artifact.get("source")
+        if evidence.total and source in UNTRUSTED_ARTIFACT_SOURCES:
+            untrusted_count += 1
+
+        receiver = artifact.get("receiver")
+        if receiver and evidence.total:
+            existing = evidence_by_receiver.setdefault(
+                receiver, ContentEvidence()
+            )
+            for category, count in evidence.category_counts.items():
+                existing.category_counts[category] = (
+                    existing.category_counts.get(category, 0) + count
+                )
+            existing.high_confidence += evidence.high_confidence
+
+    return total, untrusted_count, evidence_by_receiver

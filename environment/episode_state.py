@@ -14,6 +14,7 @@ class EpisodeState:
     mailboxes: Dict[str, list] = field(default_factory=dict)
     shared_pool: list = field(default_factory=list)
     temporary_tools: Dict[str, Any] = field(default_factory=dict)
+    observable_artifacts: List[Any] = field(default_factory=list)
 
     def reset(self, agent_names, memory, resource_budget):
         self.episode_id = str(uuid.uuid4())
@@ -23,6 +24,7 @@ class EpisodeState:
         self.mailboxes = {agent: [] for agent in agent_names}
         self.shared_pool.clear()
         self.temporary_tools.clear()
+        self.observable_artifacts.clear()
         memory.clear()
         resource_budget.reset()
         return self.episode_id

@@ -109,6 +109,7 @@ class SecurityObserver:
         original_task: str,
         assigned_subtask: str = "",
         events: Optional[list[Mapping[str, Any]]] = None,
+        artifacts: Optional[list[Mapping[str, Any]]] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> Observation:
         """
@@ -133,11 +134,18 @@ class SecurityObserver:
         events:
             Security/runtime events associated with the response.
 
+        artifacts:
+            Observable artifacts (P2): the actual text delivered to
+            agents via tool results, messages and memory writes. When
+            given, the detector scans these instead of the compact
+            event summaries.
+
         metadata:
             Additional provenance information.
         """
 
         events = list(events or [])
+        artifacts = list(artifacts) if artifacts is not None else None
 
         metadata = dict(metadata or {})
 
@@ -146,7 +154,7 @@ class SecurityObserver:
         #    evidence. Ground-truth leakage raises ValueError.
         # ---------------------------------------------------------
 
-        assert_no_ground_truth(events)
+        assert_no_ground_truth(events, artifacts=artifacts)
 
         # ---------------------------------------------------------
         # 1. Add the response itself as an observation event
@@ -166,7 +174,7 @@ class SecurityObserver:
         # 2. Cheap rule-based detection
         # ---------------------------------------------------------
 
-        detector_result = self.detector.detect(events)
+        detector_result = self.detector.detect(events, artifacts=artifacts)
 
         # ---------------------------------------------------------
         # 3. Semantic assessment

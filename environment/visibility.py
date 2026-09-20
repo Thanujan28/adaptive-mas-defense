@@ -187,9 +187,11 @@ def _find_forbidden_keys(
 
 def assert_no_ground_truth(
     events,
+    artifacts=None,
 ) -> None:
     """
-    Raise ValueError if any event carries ground-truth leakage.
+    Raise ValueError if any event or artifact carries ground-truth
+    leakage.
 
     Used as a strict, non-negotiable guard on every defender input
     (SecurityObserver.observe and SecurityStateBuilder.build).
@@ -199,8 +201,13 @@ def assert_no_ground_truth(
       * visibility == "ground_truth"
       * sender in GROUND_TRUTH_SENDERS (e.g. "attack_simulator")
       * event_type in ATTACK_EVENT_TYPES
-      * a forbidden ground-truth key anywhere in the event or its
-        nested metadata
+      * a forbidden ground-truth key anywhere in the event/artifact
+        or its nested metadata
+
+    ``artifacts`` (see ``MASEnvironment.get_observable_artifacts``)
+    are checked the same way as events: they must never carry a
+    forbidden key, ``visibility == "ground_truth"``, or an attack-type
+    ``artifact_type``.
     """
 
     problems: list[str] = []
@@ -215,8 +222,24 @@ def assert_no_ground_truth(
                 f"event[{index}]: {violation}"
             )
 
+    for index, artifact in enumerate(artifacts or []):
+
+        if not isinstance(artifact, Mapping):
+            continue
+
+        for violation in _iter_violations(artifact):
+            problems.append(
+                f"artifact[{index}]: {violation}"
+            )
+
+        for key in _find_forbidden_keys(artifact):
+            problems.append(
+                f"artifact[{index}]: forbidden key {key!r}"
+            )
+
     if problems:
         raise ValueError(
             "Ground-truth leakage detected in defender input:\n  "
             + "\n  ".join(problems)
         )
+

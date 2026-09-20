@@ -85,6 +85,58 @@ COORDINATOR_ASSIGNMENT_TEMPLATE = (
 )
 
 # =============================================================
+# OBSERVABLE ARTIFACT CHANNEL (P2)
+#
+# Per-delivery text an agent actually received: tool results,
+# inter-agent messages and memory writes. Carries no ground-truth
+# markers. See MASEnvironment.log_artifact/get_observable_artifacts.
+# =============================================================
+
+ARTIFACT_MAX_CHARS = 4000
+
+
+def _artifact_text(value: object, max_chars: int = ARTIFACT_MAX_CHARS) -> str:
+    """
+    Render an arbitrary tool-result/message/memory payload down to
+    the plain text an agent actually received, truncated to
+    ``max_chars``.
+    """
+
+    if isinstance(value, str):
+        text = value
+
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(
+                    str(
+                        item.get("content")
+                        or item.get("snippet")
+                        or item.get("description")
+                        or item.get("body")
+                        or item
+                    )
+                )
+            else:
+                parts.append(str(item))
+        text = "\n\n".join(parts)
+
+    elif isinstance(value, dict):
+        text = str(
+            value.get("content")
+            or value.get("snippet")
+            or value.get("description")
+            or value.get("body")
+            or value
+        )
+
+    else:
+        text = str(value)
+
+    return text[:max_chars]
+
+# =============================================================
 # LANGGRAPH STATE
 # =============================================================
 
@@ -350,6 +402,13 @@ class MASEnvironment:
         # =====================================================
 
         self.events = self.episode_state.events
+
+        # Observable artifact channel (P2): the text an agent
+        # actually received for each tool result / message / memory
+        # write, with no ground-truth markers. See log_artifact().
+        self.observable_artifacts = (
+            self.episode_state.observable_artifacts
+        )
 
         for agent_name, agent in self.agents.items():
 
@@ -961,6 +1020,14 @@ class MASEnvironment:
                 )
             )
 
+            self.log_artifact(
+                artifact_type="message",
+                source=sender,
+                receiver=receiver,
+                content=content,
+                message_id=message_id,
+            )
+
             return message
 
         # =====================================================
@@ -1011,6 +1078,14 @@ class MASEnvironment:
                     ),
                 },
             )
+        )
+
+        self.log_artifact(
+            artifact_type="message",
+            source=sender,
+            receiver=receiver,
+            content=content,
+            message_id=message_id,
         )
 
         return message
@@ -1456,6 +1531,14 @@ class MASEnvironment:
                 )
             )
 
+            self.log_artifact(
+                artifact_type="tool_result",
+                source=tool_name,
+                receiver=requesting_agent,
+                content=result,
+                request_id=request_id,
+            )
+
             return result
 
         # =====================================================
@@ -1695,6 +1778,14 @@ class MASEnvironment:
             )
         )
 
+        self.log_artifact(
+            artifact_type="tool_result",
+            source=tool_name,
+            receiver=requesting_agent,
+            content=result,
+            request_id=request_id,
+        )
+
         return result
 
     # =========================================================
@@ -1744,6 +1835,14 @@ class MASEnvironment:
                     ),
                 },
             )
+        )
+
+        self.log_artifact(
+            artifact_type="memory_write",
+            source=agent_name,
+            receiver=agent_name,
+            content=content,
+            message_id=memory.memory_id,
         )
 
         return memory
@@ -3266,6 +3365,7 @@ class MASEnvironment:
             original_task=original_task,
             assigned_subtask=assigned_subtask,
             events=self.get_observable_events(),
+            artifacts=self.get_observable_artifacts(),
             metadata=metadata,
         )
 
@@ -3455,6 +3555,10 @@ class MASEnvironment:
             self.episode_state.events
         )
 
+        self.observable_artifacts = (
+            self.episode_state.observable_artifacts
+        )
+
         self.log_event(
             MASEvent.create(
                 event_type="resource_reset",
@@ -3582,6 +3686,44 @@ class MASEnvironment:
             event.to_dict()
             for event in self.events
         ]
+
+    def log_artifact(
+        self,
+        artifact_type: str,
+        source: str,
+        receiver: str,
+        content: object,
+        request_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        max_chars: int = ARTIFACT_MAX_CHARS,
+    ) -> dict:
+        """
+        Record an observable artifact (P2): the exact text an agent
+        actually received for one tool result, message or memory
+        write, truncated to ``max_chars``.
+
+        Artifacts carry no ground-truth markers -- they are the
+        content itself, with no indication of why it was sent. An
+        infected tool result appears here unchanged, exactly as the
+        receiving agent saw it.
+        """
+
+        artifact = {
+            "artifact_type": artifact_type,
+            "source": source,
+            "receiver": receiver,
+            "text": _artifact_text(content, max_chars=max_chars),
+            "request_id": request_id,
+            "message_id": message_id,
+        }
+
+        self.observable_artifacts.append(artifact)
+        return artifact
+
+    def get_observable_artifacts(self):
+        # Artifacts never carry ground-truth markers by construction
+        # (see log_artifact), so no sanitisation is needed here.
+        return list(self.observable_artifacts)
 
     def get_observable_events(self):
         # Returns sanitised copies of observable events only.

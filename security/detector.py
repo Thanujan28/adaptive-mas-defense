@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 
 from .content_detector import (
     ContentEvidence,
+    detect_artifact_evidence,
     detect_content_evidence,
 )
 
@@ -88,9 +89,18 @@ class SecurityDetector:
         self,
         events: Iterable[Mapping[str, Any]],
         tool_limit: int | None = None,
+        artifacts: Iterable[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         Compute observable content and behaviour evidence.
+
+        ``artifacts`` (see
+        ``MASEnvironment.get_observable_artifacts``), when given, are
+        the preferred evidence source (P2): they carry the actual
+        text an agent received, rather than the compact summaries
+        stored in ``events``. When omitted, falls back to scanning
+        the ``content``/``memory_update`` fields of ``events``
+        (legacy path, mostly a no-op since those fields are summaries).
 
         Returns counts plus ``evidence_present`` (with a deprecated
         ``detected`` alias) and the agent ids that triggered content
@@ -98,6 +108,7 @@ class SecurityDetector:
         """
 
         events = list(events)
+        artifacts = list(artifacts) if artifacts is not None else None
 
         event_types = Counter(
             event.get("event_type")
@@ -108,10 +119,32 @@ class SecurityDetector:
         # Content evidence
         # -----------------------------------------------------
 
-        content: ContentEvidence = detect_content_evidence(
-            events,
-            use_template_signatures=self.use_template_signatures,
-        )
+        evidence_by_receiver: dict[str, ContentEvidence] = {}
+
+        if artifacts is not None:
+            (
+                content,
+                untrusted_source_evidence_count,
+                evidence_by_receiver,
+            ) = detect_artifact_evidence(
+                artifacts,
+                use_template_signatures=self.use_template_signatures,
+            )
+        else:
+            content = detect_content_evidence(
+                events,
+                use_template_signatures=self.use_template_signatures,
+            )
+            # Legacy fallback: memory writes from a sender outside
+            # the trusted agent set. In practice always 0, since
+            # every memory_write caller uses a trusted agent name
+            # (P2) -- superseded by the artifact path above.
+            untrusted_source_evidence_count = sum(
+                1
+                for event in events
+                if event.get("event_type") == "memory_write"
+                and event.get("sender") not in self.TRUSTED_SOURCES
+            )
 
         injection_evidence_count = content.category_counts.get(
             "instruction_override",
@@ -143,12 +176,10 @@ class SecurityDetector:
         relay_fanout = max(0, relay_count - message_count)
 
         # Memory writes from untrusted / external sources.
-        untrusted_source_evidence_count = sum(
-            1
-            for event in events
-            if event.get("event_type") == "memory_write"
-            and event.get("sender") not in self.TRUSTED_SOURCES
-        )
+        # (superseded by untrusted_source_evidence_count computed
+        # above when artifacts are supplied; recomputed here only for
+        # the legacy, artifact-less path so the variable always
+        # exists.)
 
         # Per-agent token spikes.
         tokens_by_agent: dict[str, int] = {}
@@ -177,15 +208,18 @@ class SecurityDetector:
         # Agents that triggered content evidence
         # -----------------------------------------------------
 
-        affected_agents = {
-            event.get("sender") or event.get("agent_id")
-            for event in events
-            if self._event_has_content_evidence(
-                event,
-                use_template_signatures=self.use_template_signatures,
-            )
-        }
-        affected_agents.discard(None)
+        if artifacts is not None:
+            affected_agents = set(evidence_by_receiver.keys())
+        else:
+            affected_agents = {
+                event.get("sender") or event.get("agent_id")
+                for event in events
+                if self._event_has_content_evidence(
+                    event,
+                    use_template_signatures=self.use_template_signatures,
+                )
+            }
+            affected_agents.discard(None)
 
         # -----------------------------------------------------
         # evidence_present

@@ -115,6 +115,7 @@ class SecurityStateBuilder:
         self,
         events: Iterable[Mapping[str, Any]],
         *,
+        artifacts: Optional[Iterable[Mapping[str, Any]]] = None,
         semantic: Optional[SemanticAssessment] = None,
         resource_state: Optional[Mapping[str, Any]] = None,
         memory_counts: Optional[Mapping[str, int]] = None,
@@ -131,6 +132,12 @@ class SecurityStateBuilder:
             OBSERVABLE events only. Ground truth here raises
             ValueError when ``strict`` is True (the default).
 
+        artifacts:
+            Observable artifacts (P2, see
+            ``MASEnvironment.get_observable_artifacts``). When given,
+            content evidence is derived from these instead of the
+            compact event summaries.
+
         semantic:
             Aggregated semantic assessment.
 
@@ -146,15 +153,17 @@ class SecurityStateBuilder:
         """
 
         events = list(events)
+        artifacts = list(artifacts) if artifacts is not None else None
         resource_state = resource_state or {}
         memory_counts = memory_counts or {}
 
         if strict:
-            assert_no_ground_truth(events)
+            assert_no_ground_truth(events, artifacts=artifacts)
 
         evidence = self.detector.detect(
             events,
             tool_limit=tool_limit,
+            artifacts=artifacts,
         )
 
         # -----------------------------------------------------
