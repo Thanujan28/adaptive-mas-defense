@@ -181,18 +181,23 @@ class CommunicationTopology:
             topology_name="layered"
         )
 
-        required_agents = {
+        # Active layered chain. The Analyst node is intentionally
+        # omitted (its edge is removed) but may remain in the agent
+        # list without breaking the topology.
+        layer_order = [
             "coordinator",
+            "outline",
             "researcher",
-            "analyst",
             "executor",
-        }
+        ]
 
-        if set(agents) == required_agents:
-            for first, second in (
-                ("coordinator", "researcher"),
-                ("researcher", "analyst"),
-                ("analyst", "executor"),
+        if all(
+            agent in agents
+            for agent in layer_order
+        ):
+            for first, second in zip(
+                layer_order,
+                layer_order[1:],
             ):
                 topology.add_bidirectional_connection(first, second)
             return topology

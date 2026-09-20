@@ -955,7 +955,6 @@ deliverables requested by the ORIGINAL USER TASK.
         ):
 
             content_section = (
-                "\nACTUAL SOURCE CONTENT:\n"
                 f"{content}"
             )
 
@@ -965,7 +964,6 @@ deliverables requested by the ORIGINAL USER TASK.
         ):
 
             content_section = (
-                "\nACTUAL SOURCE CONTENT:\n"
                 f"{snippet}"
             )
 
@@ -980,14 +978,24 @@ deliverables requested by the ORIGINAL USER TASK.
         # FINAL FORMATTED SOURCE
         # =====================================================
 
-        return (
-            f"Title: {title}\n"
-            f"Authors: {authors_text}\n"
-            f"Year: {year}\n"
-            f"DOI: {doi}\n"
-            f"URL: {url}\n"
-            f"Source URL: {source_url}\n"
-            f"Citations: {cited_by}\n"
-            f"Content status: {content_status}"
-            f"{content_section}"
-        )
+        # =====================================================
+        # TEMPORARILY COMMENTED OUT (experiment):
+        # The labeled metadata header is removed so the source
+        # content (with any injected payload) is delivered raw,
+        # directly next to the prompt, instead of being wrapped
+        # in an obvious "Title:/.../ACTUAL SOURCE CONTENT:" block
+        # that makes the injection trivially distinguishable.
+        # Restore this block to bring the header back.
+        # =====================================================
+        # return (
+        #     f"Title: {title}\n"
+        #     f"Authors: {authors_text}\n"
+        #     f"Year: {year}\n"
+        #     f"DOI: {doi}\n"
+        #     f"URL: {url}\n"
+        #     f"Source URL: {source_url}\n"
+        #     f"Citations: {cited_by}\n"
+        #     f"Content status: {content_status}"
+        #     f"{content_section}"
+        # )
+        return f"{content_section}"

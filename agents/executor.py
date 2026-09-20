@@ -6,13 +6,13 @@ from tools.mock_calendar import calendar_request_from_text
 from tools.mock_email import mail_request_from_text
 
 
-def _calendar_description_from_analysis(analysis: str) -> str:
-    """Extract only the selected topic, not the full analyst report."""
+def _calendar_description_from_findings(research_findings: str) -> str:
+    """Extract only the selected topic, not the full research report."""
 
-    text = str(analysis or "").strip()
+    text = str(research_findings or "").strip()
 
     if not text:
-        return "Selected topic from verified analysis."
+        return "Selected topic from research findings."
 
     patterns = (
         r"(?:selected|chosen|recommended)\s+topic\s*(?:is|:|-)?\s*(.+)",
@@ -47,7 +47,7 @@ def _calendar_description_from_analysis(analysis: str) -> str:
             if description:
                 return description[:300].rstrip()
 
-    return "Selected topic from verified analysis."
+    return "Selected topic from research findings."
 
 
 class ExecutorAgent:
@@ -130,7 +130,7 @@ class ExecutorAgent:
     def decide_tool(
         self,
         execution_instruction: str,
-        analysis: str
+        research_findings: str
     ):
         """
         Decide whether the Executor requires an allowed tool.
@@ -194,17 +194,17 @@ class ExecutorAgent:
             )
 
             # When creating a calendar event, use the
-            # Analyst's selected topic as the description.
+            # Researcher's selected topic as the description.
             if (
-                analysis
+                research_findings
                 and calendar_arguments.get(
                     "operation"
                 ) == "create"
             ):
 
                 calendar_arguments["description"] = (
-                    _calendar_description_from_analysis(
-                        analysis
+                    _calendar_description_from_findings(
+                        research_findings
                     )
                 )
 
@@ -256,12 +256,12 @@ class ExecutorAgent:
     def create_tool_request(
         self,
         execution_instruction,
-        analysis
+        research_findings
     ):
 
         decision = self.decide_tool(
             execution_instruction=execution_instruction,
-            analysis=analysis,
+            research_findings=research_findings,
         )
 
         if not decision.get(
@@ -284,7 +284,7 @@ class ExecutorAgent:
         self,
         task: str,
         execution_instruction: str,
-        analysis: str,
+        research_findings: str,
         tool_results=None
     ) -> str:
         """
@@ -295,8 +295,8 @@ class ExecutorAgent:
         execution_instruction:
             Final execution assignment from the Coordinator.
 
-        analysis:
-            Evidence-based analysis produced by the Analyst.
+        research_findings:
+            Evidence and key points produced by the Researcher.
 
         tool_results:
             Optional results obtained through the Coordinator
@@ -347,51 +347,49 @@ class ExecutorAgent:
         # =====================================================
 
         prompt = f"""
-You are the Executor agent in a multi-agent research
-system.
+You are the Executor agent in a multi-agent research system.
 
-Original user prompt : {task}
+You are step 3 of 3. Your bounded responsibility is ONLY to write
+the final proposal using the outline (step 1) and the Researcher's
+evidence (step 2). You do NOT gather new evidence and you do NOT
+re-design the outline.
 
-The Coordinator has assigned you the following
-execution task:
+YOUR OUTPUT GOES TO: the Coordinator, who will check it against the
+ORIGINAL GOAL below.
 
-==================================================
-EXECUTION ASSIGNMENT
-==================================================
+ORIGINAL USER PROMPT (AUTHORITATIVE - never change this goal):
+
+{task}
+
+YOUR EXECUTION ASSIGNMENT (the bounded scope for your role):
 
 {execution_instruction}
 
-==================================================
-ANALYST FINDINGS
-==================================================
+RESEARCH KEY POINTS FROM THE RESEARCHER:
 
-{analysis}
+{research_findings}
 
-==================================================
-ADDITIONAL TOOL RESULTS
-==================================================
+ADDITIONAL TOOL RESULTS:
 
 {external_context}
 
-==================================================
-PREVIOUS EXECUTOR MEMORIES
-==================================================
+PREVIOUS EXECUTOR MEMORIES (supporting context only):
 
 {memory_context}
 
-==================================================
-EXECUTION RULES
-==================================================
+WHAT YOU PRODUCE: the final proposal requested by the ORIGINAL USER
+PROMPT, built from the outline and the research key points above.
 
+EXECUTION RULES
 1. Follow the Coordinator's execution assignment.
 
-2. Use the Analyst findings as the primary basis for
-   producing the final result.
+2. Use the Researcher's key points as the primary basis for the
+   proposal. The proposal must answer the ORIGINAL USER PROMPT.
 
 3. Use supplied tool results when they are relevant.
 
-4. Do not perform a new analysis of the entire research
-   problem.
+4. Do not re-do the Researcher's evidence gathering or re-review the
+   entire research problem.
 
 5. Do not invent sources.
 
@@ -404,7 +402,7 @@ EXECUTION RULES
 9. Do not invent statistics.
 
 10. Do not invent findings that are not supported by the
-    Analyst findings or supplied tool results.
+    Researcher's key points or the supplied tool results.
 
 11. Do not claim that you performed an Internet search.
 
@@ -423,7 +421,7 @@ EXECUTION RULES
 
 17. Do not create a new task.
 
-18. Do not change the task assigned by the Coordinator.
+18. Do not change the ORIGINAL USER PROMPT.
 
 19. Do not ignore the Coordinator's assignment.
 

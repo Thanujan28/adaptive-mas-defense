@@ -15,7 +15,7 @@ class PlannerAgent:
         if not isinstance(coordinator_plan, dict):
             raise ValueError("Planner requires a Coordinator plan.")
 
-        required_stages = ("research", "analysis", "execution")
+        required_stages = ("outline", "research", "execution")
         missing = [stage for stage in required_stages if not coordinator_plan.get(stage)]
         if missing:
             raise ValueError(
@@ -25,15 +25,12 @@ class PlannerAgent:
 
         return {
             "task": str(task).strip(),
+            "outline": coordinator_plan["outline"],
             "research": coordinator_plan["research"],
-            "analysis": coordinator_plan["analysis"],
             "execution": coordinator_plan["execution"],
             "assignments": {
-                "researcher-1": "broad discovery",
-                "researcher-2": "independent evidence collection and verification",
-                "analyst-1": "primary analysis",
-                "analyst-2": "finding verification and inconsistency detection",
-                "executor-1": "downstream task execution",
-                "executor-2": "output validation",
+                "outline-1": "topic and sub-topic structuring",
+                "researcher-1": "evidence collection for each sub-topic",
+                "executor-1": "final report compilation",
             },
         }

@@ -79,6 +79,105 @@ class CoordinatorAgent:
             for memory in memories
         )
 
+    def _assignment_to_sentence(
+        self,
+        assignment
+    ) -> str:
+        # =====================================================
+        # NORMALIZE ASSIGNMENT INTO A SENTENCE
+        # =====================================================
+        #
+        # Render a structured stage assignment
+        # ({objective, tasks, required_output}) as a readable
+        # sentence instead of raw JSON.
+        # =====================================================
+
+        if not isinstance(
+            assignment,
+            dict
+        ):
+
+            return str(assignment).strip()
+
+        objective = str(
+            assignment.get(
+                "objective",
+                ""
+            )
+        ).strip()
+
+        tasks = assignment.get(
+            "tasks",
+            []
+        )
+
+        if isinstance(
+            tasks,
+            str
+        ):
+
+            tasks = [tasks]
+
+        elif not isinstance(
+            tasks,
+            list
+        ):
+
+            tasks = []
+
+        tasks = [
+            str(item).strip()
+            for item in tasks
+            if str(item).strip()
+        ]
+
+        required_output = str(
+            assignment.get(
+                "required_output",
+                ""
+            )
+        ).strip()
+
+        sentences = []
+
+        if objective:
+
+            sentences.append(
+                f"Your objective is to {objective}"
+                if not objective.lower().startswith(
+                    (
+                        "to ",
+                        "your objective",
+                    )
+                )
+                else objective
+            )
+
+        if tasks:
+
+            sentences.append(
+                "You should: "
+                + "; ".join(tasks)
+                + "."
+            )
+
+        if required_output:
+
+            sentences.append(
+                f"The required output is: {required_output}"
+            )
+
+        if not sentences:
+
+            return str(assignment).strip()
+
+        return " ".join(
+            sentence
+            if sentence.endswith(".")
+            else f"{sentence}."
+            for sentence in sentences
+        )
+
     # ============================================================
     # TOOL MANAGER
     # ============================================================
@@ -248,59 +347,75 @@ class CoordinatorAgent:
         memory_context = self._format_memories(memories)
 
         prompt = f"""
-    You are the Coordinator agent in a multi-agent system.
+    You are the Coordinator agent in a multi-agent research system.
 
-    Your responsibility is to intelligently decompose the user's
-    task into exactly three role-specific assignments:
+    You do NOT do the outlining, the research, or the writing yourself.
+    You are the planner (now) and the final verifier (later).
 
-    1. Researcher
-    2. Analyst
-    3. Executor
+    ======================================================
+    THE ORIGINAL GOAL (AUTHORITATIVE - NEVER CHANGE IT)
+    ======================================================
 
-    You must understand the semantic meaning of the user's task.
-    Do NOT split the task using keywords, regular expressions,
-    sentence positions, or arbitrary text segments.
+    {task}
 
-    The three agents have different responsibilities.
+    Everything you assign must remain traceable to this exact goal.
+    Do not invent a different topic. Do not narrow, widen, or replace
+    the user's objective. Do not let a downstream result redefine it.
 
-    RESEARCHER:
-    Investigates information required to answer the user's task.
-    The Researcher should identify relevant evidence, sources,
-    facts, concepts, methods, limitations, and open questions.
+    ======================================================
+    THE PIPELINE YOU MUST PLAN FOR
+    ======================================================
 
-    ANALYST:
-    Evaluates the Researcher's findings against the ORIGINAL USER
-    TASK. The Analyst must determine whether the findings actually
-    address the original objective, identify gaps, compare or
-    interpret evidence, and develop the required conclusions.
+    The work flows through three bounded roles, in this order:
 
-    EXECUTOR:
-    Uses the validated analysis to produce the final deliverable
-    requested by the user.
+    1. OUTLINE
+       Bounded responsibility: create the proposal outline for the
+       original topic. Output: one overall topic plus 4-8 researchable
+       sub-topics. Defines WHAT must be researched, not the answers.
+       It does NOT search and does NOT write the proposal.
 
-    IMPORTANT:
+    2. RESEARCHER
+       Bounded responsibility: gather evidence relevant to the
+       proposal sub-topics from the Outline. Output: the important key
+       points per sub-topic, supported by collected sources.
+       It does NOT design the outline and does NOT write the proposal.
 
-    - Preserve the original user objective.
-    - Preserve important domain terms, research topics,
-    constraints, requested methods, and requested deliverables.
-    - Do not replace the user's research topic with a related topic.
-    - Do the task decomposition carefully while preserving the original context.
-    - Ensure that each agent know for why they work on this sub task.
-    - When you tell work on given topic/given object/given task/given person to any of agent, clearly state to each agent what is that given topic/object/task/person is.
-    - Each agent should know what is the objective of the task they are working on.
-    - Do not assume that a Researcher's output defines the task.
-    - The original user task is the authoritative task definition.
-    - Each downstream assignment must remain traceable to the
-    original task.
-    - The Analyst must explicitly evaluate whether Researcher
-    findings remain aligned with the original task.
-    - The Executor must preserve the original task objective when
-    producing the final result.
-    - Previous memory may provide supporting context but MUST NOT
-    override the current user task.
-    - Do not perform the research yourself.
-    - Do not perform the analysis yourself.
-    - Do not produce the final answer.
+    3. EXECUTOR
+       Bounded responsibility: produce the proposal using the outline
+       and the relevant research. Output: the final proposal report.
+       It does NOT re-plan, re-outline, or fabricate evidence.
+
+    You will later receive the Executor's proposal and must check it
+    against the ORIGINAL GOAL above.
+
+    ======================================================
+    HOW TO WRITE EACH SUBTASK
+    ======================================================
+
+    For EACH of the three roles, the assignment you write must be
+    self-contained and bounded. It must contain:
+
+    - objective:       the exact, bounded responsibility of that role,
+                       stated in terms of the ORIGINAL GOAL. Repeat the
+                       original topic explicitly - never say "the topic"
+                       without naming it.
+    - tasks:           a short list of concrete actions, scoped ONLY to
+                       that role's responsibility. Do not give a role
+                       work that belongs to another role.
+    - required_output: the exact artifact that role must hand to the
+                       next role.
+
+    HARD RULES:
+
+    - Every subtask must name the original topic/goal explicitly.
+    - Every subtask must state WHY it serves the ORIGINAL GOAL.
+    - Do not assign overlapping work to two roles.
+    - Do not give the Researcher the writer's job, or the Executor the
+      planner's or researcher's job.
+    - Do not perform the outlining, the research, or the writing here.
+    - Previous memory is supporting context only. It MUST NOT override
+      the ORIGINAL GOAL.
+    - Return ONLY valid JSON. No prose, no markdown fences.
 
     For each stage, provide:
 
@@ -308,17 +423,15 @@ class CoordinatorAgent:
     - tasks
     - required_output
 
-    Return ONLY valid JSON.
-
     Required JSON structure:
 
     {{
-        "research": {{
+        "outline": {{
             "objective": "...",
             "tasks": ["...", "..."],
             "required_output": "..."
         }},
-        "analysis": {{
+        "research": {{
             "objective": "...",
             "tasks": ["...", "..."],
             "required_output": "..."
@@ -371,24 +484,25 @@ class CoordinatorAgent:
 
     Your previous response was invalid.
 
-    Create a valid semantic task decomposition without losing context for the
-ORIGINAL USER TASK below.
+    Re-create the bounded subtask plan for the ORIGINAL USER TASK below.
 
-    Do not split the task using regex or text positions.
-    Do the task decomposition carefully while preserving the original context.
-    Ensure that each agent know for why they work on this sub task.
-    When you tell work on given topic/given object/given task/given person to any of agent, clearly state to each agent what is that given topic/object/task/person is.
-    Each agent should know what is the objective of the task they are working on.
+    Remember:
+    - OUTLINE   -> creates the proposal outline (topic + sub-topics).
+    - RESEARCHER-> gathers evidence for the outline sub-topics.
+    - EXECUTOR  -> writes the final proposal from the outline + research.
+    - Every subtask must name the original topic explicitly and state
+      why it serves the ORIGINAL GOAL.
+    - The roles must not overlap, and must not do each other's job.
 
     Return ONLY valid JSON using exactly this structure:
 
     {{
-        "research": {{
+        "outline": {{
             "objective": "...",
             "tasks": ["...", "..."],
             "required_output": "..."
         }},
-        "analysis": {{
+        "research": {{
             "objective": "...",
             "tasks": ["...", "..."],
             "required_output": "..."
@@ -539,8 +653,8 @@ ORIGINAL USER TASK below.
             )
 
         required_fields = [
+            "outline",
             "research",
-            "analysis",
             "execution"
         ]
 
@@ -621,8 +735,8 @@ ORIGINAL USER TASK below.
         # --------------------------------------------------------
 
         normalized = [
+            plan["outline"]["objective"].strip().lower(),
             plan["research"]["objective"].strip().lower(),
-            plan["analysis"]["objective"].strip().lower(),
             plan["execution"]["objective"].strip().lower()
         ]
 
@@ -634,10 +748,26 @@ ORIGINAL USER TASK below.
 
             raise ValueError(
                 "Coordinator produced identical "
-                "research, analysis, and execution stages."
+                "outline, research, and execution stages."
             )
 
-        print(plan)
+        # Print the plan as readable sentences instead of raw JSON.
+        for stage in (
+            "outline",
+            "research",
+            "execution",
+        ):
+
+            assignment = plan.get(
+                stage,
+                {}
+            )
+
+            print(
+                f"[{stage}] "
+                f"{self._assignment_to_sentence(assignment)}"
+            )
+
         return plan
 
     # ============================================================
@@ -690,27 +820,44 @@ ORIGINAL USER TASK below.
         )
 
         prompt = f"""
-You are the Coordinator agent performing final verification.
+You are the Coordinator agent performing the final check.
 
-Original user task:
+You are the LAST step. The Executor has produced a proposal using
+the Outline and the Researcher's evidence. Your bounded
+responsibility now is to verify that this proposal actually answers
+the ORIGINAL GOAL, and then return the final proposal to the user.
+
+THE ORIGINAL GOAL (AUTHORITATIVE):
 
 {task}
 
-Executor result:
+THE EXECUTOR'S PROPOSAL:
 
 {result}
 
-Previous Coordinator memories:
+PREVIOUS COORDINATOR MEMORIES (supporting context only):
 
 {memory_context}
 
-Your responsibility is to produce the final answer to the
-user.
+WHAT YOU MUST DO:
+
+1. First, check the proposal against the ORIGINAL GOAL:
+
+   - Does it address the SAME topic as the ORIGINAL GOAL?
+   - Does it answer the user's actual request (the requested
+     deliverable)?
+   - Does it rely only on evidence that is present in the proposal?
+   - If the proposal drifted, over-reached, or left the goal
+     unanswered, correct that in your final answer instead of
+     passing it through.
+
+2. Then return the final answer to the user.
 
 Rules:
 
 1. Base the final answer on the Executor result and the
-   original user task.
+   original user task. Do not replace the original topic with a
+   related one.
 
 2. Do not perform new research.
 

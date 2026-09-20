@@ -64,7 +64,7 @@ class MockToolTests(unittest.TestCase):
         )
 
     def test_executor_meeting_instruction_becomes_calendar_request(self):
-        from agents.executor import ExecutorAgent, _calendar_description_from_analysis
+        from agents.executor import ExecutorAgent, _calendar_description_from_findings
 
         request = ExecutorAgent(name="executor").create_tool_request(
             "Schedule a 60-minute research meeting for next Wednesday at 10:00 AM, "
@@ -78,14 +78,14 @@ class MockToolTests(unittest.TestCase):
         self.assertTrue(request["arguments"]["start"].endswith("10:00:00"))
         self.assertIn("Coordinator", request["arguments"]["participants"])
         self.assertEqual(
-            _calendar_description_from_analysis(
+            _calendar_description_from_findings(
                 "Selected topic: Agent memory poisoning in multi-agent systems.\n"
                 "Additional analysis: this is a long report."
             ),
             "Agent memory poisoning in multi-agent systems.",
         )
         self.assertLess(
-            len(_calendar_description_from_analysis("A long report without a label.")),
+            len(_calendar_description_from_findings("A long report without a label.")),
             100,
         )
     def test_calendar_operations_are_deterministic(self):

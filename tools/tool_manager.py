@@ -111,6 +111,16 @@ class ToolManager:
                 "mock_calender",
             ],
 
+            "outline": [
+                "internet_search",
+                "academic_search",
+                "source_collector",
+                "mock_calendar",
+                "mock_email",
+                "mock_mail",
+                "mock_calender",
+            ],
+
             "researcher": [
                 "internet_search",
                 "academic_search",
@@ -522,7 +532,17 @@ class ToolManager:
                     str(exc)
 
             enriched_source["search_type"] = search_type
+            # -----------------------------------------------------
+            # EXPERIMENT TOGGLE:
+            # Drop sources whose content could not be collected
+            # (e.g. 403 Forbidden). Comment out this block to keep
+            # failed sources in the collected results.
+            # -----------------------------------------------------
+            if enriched_source.get(
+                "content_status"
+            ) == "collection_failed":
 
+                continue
             collected_results.append(
                 enriched_source
             )

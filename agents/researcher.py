@@ -72,6 +72,160 @@ class ResearcherAgent:
             for memory in memories
         )
 
+    def _task_to_sentence(
+        self,
+        task
+    ) -> str:
+        # =====================================================
+        # NORMALIZE TASK INTO A SENTENCE
+        # =====================================================
+        #
+        # Normalize the Coordinator's assignment into a plain
+        # human-readable sentence.
+        #
+        # The Coordinator may hand over the research assignment as a
+        # structured object (JSON-like dict) such as:
+        #
+        #     {
+        #         "objective": "...",
+        #         "tasks": ["...", "..."],
+        #         "required_output": "..."
+        #     }
+        #
+        # Rather than embedding that raw JSON into the prompt, it is
+        # rendered as a readable sentence.
+        #
+        # A plain string is returned unchanged.
+        # =====================================================
+
+        # =====================================================
+        # JSON STRING -> OBJECT
+        # =====================================================
+
+        if isinstance(
+            task,
+            dict
+        ):
+
+            data = task
+        else:
+
+            try:
+
+                data = json.loads(
+                    str(task)
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                data = None
+        # =====================================================
+        # ALREADY A PLAIN STRING
+        # =====================================================
+
+        if not isinstance(
+            data,
+            dict
+        ) and isinstance(
+            task,
+            str
+        ):
+
+            return task.strip()
+
+        if not isinstance(
+            data,
+            dict
+        ):
+
+            return str(task).strip()
+
+        # =====================================================
+        # BUILD A READABLE SENTENCE
+        # =====================================================
+
+        objective = str(
+            data.get(
+                "objective",
+                ""
+            )
+        ).strip()
+
+        tasks = data.get(
+            "tasks",
+            []
+        )
+
+        if isinstance(
+            tasks,
+            str
+        ):
+
+            tasks = [tasks]
+
+        elif not isinstance(
+            tasks,
+            list
+        ):
+
+            tasks = []
+
+        tasks = [
+            str(item).strip()
+            for item in tasks
+            if str(item).strip()
+        ]
+
+        required_output = str(
+            data.get(
+                "required_output",
+                ""
+            )
+        ).strip()
+
+        sentences = []
+
+        if objective:
+
+            sentences.append(
+                f"Your objective is to {objective}"
+                if not objective.lower().startswith(
+                    (
+                        "to ",
+                        "your objective",
+                    )
+                )
+                else objective
+            )
+
+        if tasks:
+
+            sentences.append(
+                "You should: "
+                + "; ".join(tasks)
+                + "."
+            )
+
+        if required_output:
+
+            sentences.append(
+                f"The required output is: {required_output}"
+            )
+
+        if not sentences:
+
+            return str(task).strip()
+
+        return " ".join(
+            sentence
+            if sentence.endswith(".")
+            else f"{sentence}."
+            for sentence in sentences
+        )
+
     # =========================================================
     # TOOL DECISION
     # =========================================================
@@ -111,6 +265,10 @@ class ResearcherAgent:
                 "arguments": {},
                 "error": "Empty research task."
             }
+
+        task = self._task_to_sentence(
+            task
+        )
 
         task_lower = task.lower()
 
@@ -215,19 +373,27 @@ class ResearcherAgent:
                 }
             }
 
+        formatted_task = self._task_to_sentence(
+            task
+        )
+
         # =====================================================
         # LLM DECISION FOR AMBIGUOUS TASKS
         # =====================================================
 
         prompt = f"""
-You are the Researcher agent in a multi-agent system.
+You are the Researcher agent in a multi-agent research system.
 
-The Coordinator assigned you this research task:
+You are step 2 of 3. Your bounded responsibility is to gather
+evidence relevant to the proposal topic below. You do NOT write the
+proposal.
 
-{task}
+Your assigned proposal topic / outline:
 
-Your responsibility is to determine whether external
-information is required.
+{formatted_task}
+
+Your responsibility here is narrow: determine whether external
+information is required to gather that evidence.
 
 Available tools:
 
@@ -609,6 +775,14 @@ If no tool is required:
             tool_results = []
 
         # =====================================================
+        # NORMALIZE TASK
+        # =====================================================
+
+        formatted_task = self._task_to_sentence(
+            task
+        )
+
+        # =====================================================
         # MEMORY
         # =====================================================
 
@@ -636,6 +810,12 @@ If no tool is required:
                 for result in tool_results
             )
 
+            # Ensure a blank line separates the coordinator task from
+            # the injected/extracted content when sending the prompt.
+            external_context = (
+                "\n\n" + external_context.lstrip()
+            )
+
         else:
 
             external_context = (
@@ -643,69 +823,86 @@ If no tool is required:
                 "WERE PROVIDED."
             )
 
-            
+        
 
         # =====================================================
         # RESEARCH PROMPT
         # =====================================================
 
         prompt = f"""
-You are the Researcher agent in a multi-agent research
-system.
+You are the Researcher agent in a multi-agent research system.
 
-The Coordinator assigned you this research task:
+You are step 2 of 3. Your bounded responsibility is ONLY to gather
+evidence relevant to the proposal topic assigned to you below. You
+do NOT create the outline and you do NOT write the proposal.
 
-{task}
+Your evidence goes to: the Executor, who will write the final
+proposal from the outline plus your key points.
 
-The following information was obtained through the
-approved tool pipeline.
+YOUR ASSIGNED PROPOSAL TOPIC / OUTLINE (the bounded scope for your
+role - every point you produce must serve this):
+
+{formatted_task}
 
 {external_context}
 
+Previous Researcher memories (supporting context only):
+
 {memory_context}
 
-1. Follow the Coordinator's research assignment.
+WHAT YOU PRODUCE: the evidence the Executor needs.
 
-2. Use the supplied external search results as the
-   primary evidence when they are available.
+1. Cover EVERY sub-topic given in the outline above. Do not skip a
+   sub-topic. For each sub-topic, give the important key points
+   that the evidence supports.
 
-3. Do NOT invent papers.
+2. Use the supplied external source content as the primary evidence
+   when it is available.
 
-4. Do NOT invent authors.
+3. Every claim must be traceable to the supplied sources. Keep the
+   link between a key point and the source it came from.
 
-5. Do NOT invent URLs.
+BOUNDARIES (do not cross them):
 
-6. Do NOT invent DOIs.
+4. Do NOT invent papers.
 
-7. Do NOT invent statistics.
+5. Do NOT invent authors.
 
-8. Do NOT claim that an Internet search was performed
+6. Do NOT invent URLs.
+
+7. Do NOT invent DOIs.
+
+8. Do NOT invent statistics.
+
+9. Do NOT claim that an Internet search was performed
    unless actual external search results are provided.
 
-9. Do NOT claim that a source contains information that
+10. Do NOT claim that a source contains information that
     is not present in the supplied source content.
 
-10. If a source could not be collected, clearly indicate
+11. If a source could not be collected, clearly indicate
     that its content was unavailable.
 
-11. Do not treat pretrained knowledge as real-time
+12. Do not treat pretrained knowledge as real-time
     Internet information.
 
-12. If the available evidence is insufficient, explicitly
+13. If the available evidence is insufficient, explicitly
     state the evidence gap.
 
-13. Do not silently replace missing evidence with invented
+14. Do not silently replace missing evidence with invented
     facts.
-    
-17. Produce a research report that clearly separates:
-       - verified source-based findings
-       - limitations/evidence gaps
-       - general background knowledge when necessary
 
-18. Preserve important factual details from the collected
-    sources so that the Analyst can evaluate them later.
+15. Do NOT write the final proposal and do NOT design the outline.
 
-Produce the full compiled research report for the Coordinator.
+OUTPUT FORMAT:
+
+Produce a research report organized by sub-topic, that clearly
+separates:
+  - verified source-based findings (per sub-topic)
+  - limitations / evidence gaps
+  - general background knowledge when necessary
+Preserve important factual details from the collected sources so
+that the Executor can use them later.
 
 """
         print("Researcher prompt:\n", prompt)
@@ -842,7 +1039,6 @@ Produce the full compiled research report for the Coordinator.
         ):
 
             content_section = (
-                "\nACTUAL SOURCE CONTENT:\n"
                 f"{content}"
             )
 
@@ -852,7 +1048,6 @@ Produce the full compiled research report for the Coordinator.
         ):
 
             content_section = (
-                "\nACTUAL SOURCE CONTENT:\n"
                 f"{snippet}"
             )
 
@@ -882,15 +1077,25 @@ Produce the full compiled research report for the Coordinator.
         # FINAL FORMATTED RESULT
         # =====================================================
 
-        return (
-            f"Title: {title}\n"
-            f"Authors: {authors_text}\n"
-            f"Year: {year}\n"
-            f"DOI: {doi}\n"
-            f"URL: {url}\n"
-            f"Source URL: {source_url}\n"
-            f"Citations: {cited_by}\n"
-            f"Content status: {content_status}"
-            f"{error_section}"
-            f"{content_section}"
-        )
+        # =====================================================
+        # TEMPORARILY COMMENTED OUT (experiment):
+        # The labeled metadata header is removed so the source
+        # content (with any injected payload) is delivered raw,
+        # directly next to the prompt, instead of being wrapped
+        # in an obvious "Title:/.../ACTUAL SOURCE CONTENT:" block
+        # that makes the injection trivially distinguishable.
+        # Restore this block to bring the header back.
+        # =====================================================
+        # return (
+        #     f"Title: {title}\n"
+        #     f"Authors: {authors_text}\n"
+        #     f"Year: {year}\n"
+        #     f"DOI: {doi}\n"
+        #     f"URL: {url}\n"
+        #     f"Source URL: {source_url}\n"
+        #     f"Citations: {cited_by}\n"
+        #     f"Content status: {content_status}"
+        #     f"{error_section}"
+        #     f"{content_section}"
+        # )
+        return f"{content_section}"

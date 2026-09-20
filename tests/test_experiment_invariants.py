@@ -5,6 +5,7 @@ from environment.topology import CommunicationTopology
 
 AGENTS = [
     "coordinator",
+    "outline",
     "researcher",
     "analyst",
     "executor",
