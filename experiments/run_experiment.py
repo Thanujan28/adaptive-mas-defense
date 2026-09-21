@@ -7,14 +7,22 @@ import sys
 from pathlib import Path
 
 from benchmark import build_benchmark
-from attacks.scenarios import apply_attack, record_response
+from attacks.scenarios import (
+    IMPLEMENTED_CONDITIONS,
+    UNIMPLEMENTED_CONDITIONS,
+    apply_attack,
+    record_response,
+)
 from environment.mas_environment import MASEnvironment
 from rl.environment import PPOEnvironment
 from rl.policy import PPOReward
-
-
 TOPOLOGIES = ("centralized", "layered", "fully_connected", "shared_pool")
-ATTACK_CONDITIONS = ("clean", "memory_poisoning", "prompt_infection", "resource_exhaustion")
+
+# Single source of truth lives in attacks/scenarios.py. Only these
+# conditions are evaluated; anything unimplemented is reported as
+# "NOT IMPLEMENTED - not evaluated" instead of crashing the run or
+# producing a fabricated number.
+ATTACK_CONDITIONS = IMPLEMENTED_CONDITIONS
 
 
 def run_experiment(
@@ -35,6 +43,12 @@ def run_experiment(
         "runner_version": "resource-controlled-v1",
     }
     results = []
+
+    # Never silently skip or fabricate: state plainly which conditions
+    # exist but are not evaluated.
+    for condition in UNIMPLEMENTED_CONDITIONS:
+        print(f"{condition}: NOT IMPLEMENTED - not evaluated")
+
     tasks = build_benchmark()[:limit] if limit is not None else build_benchmark()
     for topology in TOPOLOGIES:
         for attack_condition in ATTACK_CONDITIONS:

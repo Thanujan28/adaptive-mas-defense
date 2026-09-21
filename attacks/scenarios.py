@@ -1,6 +1,30 @@
 from typing import Any
-
 from attacks.prompt_infection import PromptInfectionAttack
+# =============================================================
+# IMPLEMENTED ATTACK CONDITIONS (single source of truth)
+#
+# Only these conditions are actually implemented by
+# ``apply_attack``. Anything else (memory_poisoning,
+# resource_exhaustion, toma, ...) has no simulator in this
+# repository: ``attacks/memory_poisoning.py``,
+# ``attacks/resource_exhaustion.py`` and ``attacks/toma.py`` are
+# empty stubs. Experiments MUST iterate over this tuple (not a
+# hand-maintained list) so that no number is ever reported for an
+# unimplemented condition.
+# =============================================================
+
+IMPLEMENTED_CONDITIONS: tuple[str, ...] = (
+    "clean",
+    "prompt_infection",
+)
+
+# Attack conditions that experiments may wish to evaluate but which
+# are deliberately NOT implemented. Reported as
+# "NOT IMPLEMENTED - not evaluated"; never assigned a number.
+UNIMPLEMENTED_CONDITIONS: tuple[str, ...] = (
+    "memory_poisoning",
+    "resource_exhaustion",
+)
 
 
 def apply_attack(
