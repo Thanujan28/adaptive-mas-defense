@@ -46,7 +46,7 @@ DEFAULT_TOKEN_BASELINE_TASK = (
 )
 
 
-def _stub_agents_and_tools(env, stub_encoder: bool) -> None:
+def _install_stub_llm() -> None:
     """
     Optionally replace the live LLM and the real tools with
     deterministic in-memory stubs (no Ollama, no network, no docx, no
@@ -54,14 +54,7 @@ def _stub_agents_and_tools(env, stub_encoder: bool) -> None:
     and a live run exercise the same detector paths.
     """
 
-    from tests.conftest import (
-        StubCalendar,
-        StubEmail,
-        StubLLM,
-        StubReportWriter,
-        StubSearchTool,
-    )
-
+    from tests.conftest import StubLLM
     import agents.analyst as analyst_module
     import agents.coordinator as coordinator_module
     import agents.executor as executor_module
@@ -76,6 +69,17 @@ def _stub_agents_and_tools(env, stub_encoder: bool) -> None:
         executor_module,
     ):
         module.get_llm = lambda: stub
+
+def _stub_tools(env) -> None:
+    """Swap every real tool for an in-memory stub (no network)."""
+
+    from tests.conftest import (
+        StubCalendar,
+        StubEmail,
+        StubReportWriter,
+        StubSearchTool,
+    )
+
     tools = env.tool_manager.tools
     for name in ("internet_search", "academic_search"):
         if name in tools:
@@ -100,10 +104,15 @@ def _run_clean_episode(
     # this script must still be able to report on (as "error") when
     # unavailable, rather than crashing entirely.
     from environment.mas_environment import MASEnvironment
+    # Patch the LLM BEFORE building the env (agents call get_llm()
+    # during __init__).
+    if stub_llm:
+        _install_stub_llm()
+
     env = MASEnvironment(topology_name=topology_name)
 
     if stub_llm:
-        _stub_agents_and_tools(env, stub_encoder=stub_encoder)
+        _stub_tools(env)
 
     env.execute_task(task)
     return env
