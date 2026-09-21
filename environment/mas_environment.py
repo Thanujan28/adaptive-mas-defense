@@ -1876,8 +1876,15 @@ class MASEnvironment:
                 ),
 
                 metadata={
-                    "query":
-                        query,
+                    # P7: the raw query text is upstream/agent-derived
+                    # (it embeds the outline/assignment) and must NOT
+                    # be stored in an environment-authored metadata
+                    # field -- record only its length, like the other
+                    # summary events do.
+                    "query_length":
+                        self._content_length(
+                            query
+                        ),
 
                     "top_k":
                         top_k,
