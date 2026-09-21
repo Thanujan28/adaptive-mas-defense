@@ -123,8 +123,13 @@ checkpoints/
 
 results/
 outputs/
-experiments/
 reports/generated/
+
+# experiments/: generated data/outputs stay ignored, but the
+# experiment SCRIPTS themselves are source and must be tracked
+# (otherwise new evaluation/calibration scripts are never committed).
+experiments/**
+!experiments/*.py
 
 # Large experiment artifacts
 *.pkl
