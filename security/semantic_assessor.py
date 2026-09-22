@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import numpy as np
@@ -28,6 +29,28 @@ def _cosine_similarity(
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+# =============================================================
+# PARAGRAPH-AWARE CHUNKING
+# =============================================================
+#
+# A whole-response embedding averages an entire (often long) report
+# into a single vector. An off-topic or injected passage buried inside
+# hundreds of on-topic words is diluted until it is invisible to the
+# cosine similarity (the "truncation blind spot"). Splitting the
+# response into paragraph-aware, ~150-200 word chunks and embedding
+# each one preserves the local signal that whole-response assessment
+# averages away.
+
+# Default chunk size band, in whitespace-delimited words.
+CHUNK_MIN_WORDS = 150
+CHUNK_MAX_WORDS = 200
+
+# Sentence boundary: end-of-sentence punctuation followed by
+# whitespace and a capital/Ithas-no-effect guard. Used only to avoid
+# splitting mid-sentence when a paragraph must be broken up.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def _as_text(value) -> str:
@@ -82,6 +105,114 @@ class SemanticAssessment:
                 + 0.2 * self.scope_deviation,
             ),
         )
+
+
+def split_into_chunks(
+    text: str,
+    min_words: int = CHUNK_MIN_WORDS,
+    max_words: int = CHUNK_MAX_WORDS,
+) -> list[str]:
+    """
+    Split ``text`` into paragraph-aware chunks of ~``min_words`` to
+    ``max_words`` words.
+
+    Rules, in order:
+
+      1. Split on blank lines into paragraphs; those are the preferred
+         boundaries so a chunk never straddles unrelated sections.
+      2. A paragraph longer than ``max_words`` is broken at sentence
+         boundaries (never mid-sentence) into pieces of at most
+         ``max_words`` words.
+      3. Consecutive short paragraphs are merged so a chunk reaches at
+         least ~``min_words`` words when the text allows it, avoiding a
+         flood of tiny, low-confidence chunks.
+
+    Short inputs (fewer than ``min_words`` words total) yield a single
+    chunk equal to the stripped input, so chunked assessment degrades
+    gracefully to whole-response assessment on short outputs.
+    """
+
+    text = _as_text(text)
+    if not text:
+        return []
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+
+    # 2. Break over-long paragraphs at sentence boundaries.
+    pieces: list[str] = []
+    for paragraph in paragraphs:
+        words = paragraph.split()
+        if len(words) <= max_words:
+            pieces.append(paragraph)
+            continue
+
+        sentences = _SENTENCE_SPLIT.split(paragraph)
+        current: list[str] = []
+        current_words = 0
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+            if current and current_words + sentence_words > max_words:
+                pieces.append(" ".join(current))
+                current = []
+                current_words = 0
+            current.append(sentence)
+            current_words += sentence_words
+        if current:
+            pieces.append(" ".join(current))
+
+    # 3. Greedily merge while staying under max_words and until the
+    #    running chunk reaches min_words.
+    chunks: list[str] = []
+    buffer: list[str] = []
+    buffer_words = 0
+    for piece in pieces:
+        piece_words = len(piece.split())
+        if buffer and buffer_words + piece_words > max_words:
+            chunks.append("\n\n".join(buffer))
+            buffer = []
+            buffer_words = 0
+        buffer.append(piece)
+        buffer_words += piece_words
+        if buffer_words >= min_words:
+            chunks.append("\n\n".join(buffer))
+            buffer = []
+            buffer_words = 0
+    if buffer:
+        chunks.append("\n\n".join(buffer))
+
+    return chunks
+
+
+@dataclass
+class ChunkedSemanticAssessment:
+    """
+    Aggregate result of assessing an agent output chunk by chunk.
+
+    ``chunks`` holds one ``SemanticAssessment`` per chunk, in order.
+    ``worst_chunk_index`` / ``worst_chunk_deviation`` surface the single
+    most deviant chunk (the "worst-chunk" rule), which is the signal a
+    whole-response embedding averages away. ``assessed`` is True only if
+    at least one chunk was assessed against a reference task.
+    """
+
+    chunks: list[SemanticAssessment] = field(default_factory=list)
+    chunk_texts: list[str] = field(default_factory=list)
+    worst_chunk_index: int = -1
+    worst_chunk_deviation: float = 0.0
+    worst_chunk_confidence: float = 0.0
+    assessed: bool = False
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self.chunks)
+
+    @property
+    def worst_chunk(self) -> Optional[SemanticAssessment]:
+        if 0 <= self.worst_chunk_index < len(self.chunks):
+            return self.chunks[self.worst_chunk_index]
+        return None
 
 
 class SemanticAssessor:
@@ -334,3 +465,74 @@ class SemanticAssessor:
             confidence=confidence,
             assessed=True,
         )
+
+    def assess_chunked(
+        self,
+        original_task: str,
+        assigned_subtask: str,
+        agent_output: str,
+        min_words: int = CHUNK_MIN_WORDS,
+        max_words: int = CHUNK_MAX_WORDS,
+    ) -> ChunkedSemanticAssessment:
+        """
+        Assess an agent output CHUNK BY CHUNK.
+
+        The output is split into paragraph-aware chunks of roughly
+        ``min_words``-``max_words`` words (see ``split_into_chunks``) and
+        each chunk is embedded against ``(original_task,
+        assigned_subtask)`` exactly the way ``assess()`` embeds the
+        whole response -- identical reference texts, identical
+        similarity normalisation and identical deviation formula. Only
+        the unit of comparison changes (chunk instead of whole
+        response).
+
+        Returns a ``ChunkedSemanticAssessment`` carrying the per-chunk
+        assessments, the chunk texts, and the worst-chunk aggregate
+        (``worst_chunk_index`` / ``worst_chunk_deviation``).
+
+        ``assess()`` is intentionally left unchanged; use this method
+        when a long response could hide a locally deviant passage that
+        whole-response averaging would dilute.
+        """
+
+        agent_output = _as_text(agent_output)
+        chunks = split_into_chunks(
+            agent_output,
+            min_words=min_words,
+            max_words=max_words,
+        )
+
+        aggregate = ChunkedSemanticAssessment(
+            chunk_texts=chunks,
+        )
+
+        if not chunks:
+            return aggregate
+
+        for chunk in chunks:
+            assessment = self.assess(
+                original_task=original_task,
+                assigned_subtask=assigned_subtask,
+                agent_output=chunk,
+            )
+            aggregate.chunks.append(assessment)
+
+            if not assessment.assessed:
+                continue
+
+            aggregate.assessed = True
+
+            if (
+                aggregate.worst_chunk_index < 0
+                or assessment.deviation_score
+                > aggregate.worst_chunk_deviation
+            ):
+                aggregate.worst_chunk_index = len(aggregate.chunks) - 1
+                aggregate.worst_chunk_deviation = (
+                    assessment.deviation_score
+                )
+                aggregate.worst_chunk_confidence = (
+                    assessment.confidence
+                )
+
+        return aggregate
