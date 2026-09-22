@@ -11,3 +11,7 @@ requests==2.34.2
 transformers==4.46.3
 sentence-transformers==3.3.1
 langgraph-checkpoint==4.2.0
+
+# Live monitoring dashboard (streamlit_app.py). Already present in the
+# research environment; pinned here for reproducibility.
+streamlit==1.61.1
