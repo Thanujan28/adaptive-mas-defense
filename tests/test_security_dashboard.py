@@ -16,7 +16,6 @@ import unittest
 from pathlib import Path
 
 from experiments.security_dashboard import (
-    agent_row_from_tiered,
     build_dashboard_rows,
     dump_dashboard,
     load_records,
@@ -276,6 +275,56 @@ class GuiSmokeTests(unittest.TestCase):
             )
         finally:
             root.destroy()
+
+
+class LiveModeTests(unittest.TestCase):
+
+    def test_live_flag_exists_and_defaults_off(self):
+        from experiments.security_dashboard import parse_args
+
+        self.assertFalse(parse_args([]).live)
+        self.assertTrue(parse_args(["--live"]).live)
+        self.assertFalse(parse_args([]).stub_tools)
+        self.assertTrue(parse_args(["--live", "--stub-tools"]).stub_tools)
+        self.assertIsNone(parse_args([]).nli_model)
+        self.assertEqual(
+            parse_args(["--nli-model", "x/y"]).nli_model, "x/y"
+        )
+
+    def test_live_does_not_fall_back_to_a_saved_run_or_demo(self):
+        """
+        --live must force a real episode even when outputs/last_run.jsonl
+        or outputs/demo_logs.jsonl exist. We stub _run_live_episode so the
+        test does not need Ollama, and assert it was called instead of the
+        file-replay path.
+        """
+
+        import experiments.security_dashboard as dash
+
+        called = {"live": False}
+
+        def _fake_live(args):
+            called["live"] = True
+            return []  # no observations -> empty dashboard, fine
+
+        original = dash._run_live_episode
+        dash._run_live_episode = _fake_live
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # Create a demo file that WOULD be picked up if the code
+                # wrongly fell back to it.
+                demo = Path(tmp) / "demo.jsonl"
+                write_template(demo)
+                code = dash.main(
+                    ["--live", "--dump", "--from-jsonl", str(demo)]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(
+                called["live"],
+                "--live did not run a real episode (fell back to a file)",
+            )
+        finally:
+            dash._run_live_episode = original
 
 
 if __name__ == "__main__":

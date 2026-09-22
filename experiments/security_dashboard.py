@@ -289,7 +289,7 @@ def _build_assessor(stub: bool):
     return SemanticAssessor()
 
 
-def _build_nli_checker(stub_nli: bool):
+def _build_nli_checker(stub_nli: bool, model_name: Optional[str] = None):
     from experiments.show_security_logs import (
         _StubNLIModel,
     )
@@ -297,6 +297,10 @@ def _build_nli_checker(stub_nli: bool):
 
     if stub_nli:
         return ContradictionChecker(model=_StubNLIModel())
+    # Real NLI: allow overriding the model so a locally-cached NLI model
+    # can be used without re-downloading roberta-large-mnli.
+    if model_name:
+        return ContradictionChecker(model_name=model_name)
     return ContradictionChecker()
 
 
@@ -319,6 +323,7 @@ def run_from_records(
     stub_nli: bool,
     stub_judge: bool,
     strategy: str,
+    nli_model: Optional[str] = None,
 ) -> list[Any]:
     """Run the tiered observer over JSONL-style records (offline)."""
 
@@ -326,7 +331,7 @@ def run_from_records(
 
     observer = SecurityObserver(
         semantic_assessor=_build_assessor(stub_encoder),
-        contradiction_checker=_build_nli_checker(stub_nli),
+        contradiction_checker=_build_nli_checker(stub_nli, nli_model),
         llm_judge=_build_judge(stub_judge),
         resource_allocator=_build_allocator(strategy),
         log_enabled=False,
@@ -624,11 +629,27 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Stub encoder (offline).")
     parser.add_argument("--stub-nli", action="store_true",
                         help="Stub NLI checker (offline).")
+    parser.add_argument("--nli-model", default=None,
+                        help="Real NLI model name to load (default: "
+                             "roberta-large-mnli). Use a locally-cached "
+                             "model to avoid a large download, e.g. "
+                             "typeform/distilbert-base-uncased-mnli.")
     parser.add_argument("--stub-judge", action="store_true",
                         help="Stub Tier-3 judge (offline).")
     parser.add_argument("--strategy", default="formula",
                         choices=["no_investigation", "brute_force", "formula"])
-    parser.add_argument("--from-jsonl", type=Path, default=None)
+    parser.add_argument("--from-jsonl", type=Path, default=None,
+                        help="Replay records from a JSONL (offline).")
+    parser.add_argument("--live", action="store_true",
+                        help="Run a REAL episode with the real LLM/NLI/judge "
+                             "(needs Ollama). Takes precedence over "
+                             "--from-jsonl and never falls back to the demo.")
+    parser.add_argument("--stub-tools", action="store_true",
+                        help="With --live, swap external tools (web/academic "
+                             "search, docx, calendar, email) for the in-memory "
+                             "stubs so a real agent run completes offline. "
+                             "The AGENTS and the NLI/judge tiers still run for "
+                             "real unless their own --stub-* flag is set.")
     parser.add_argument("--write-template", action="store_true",
                         help="Write a demo JSONL and exit.")
     parser.add_argument("--dump", action="store_true",
@@ -646,14 +667,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         write_template(Path("outputs/demo_logs.jsonl"))
         return 0
 
-    # Resolve input source.
-    if args.from_jsonl is None:
-        demo = Path("outputs/demo_logs.jsonl")
-        if demo.exists():
-            args.from_jsonl = demo
-            print(f"[input] using {demo}")
-
-    if args.from_jsonl is not None:
+    if args.live:
+        # Explicit REAL run: never fall back to the demo file.
+        print(
+            "[input] --live: running a REAL episode through the tiered "
+            "observer (real agents via Ollama + real NLI + real judge)."
+        )
+        if args.stub or args.stub_nli or args.stub_judge:
+            print(
+                "[input] NOTE: stub flags were also passed; those tiers "
+                "will use stubs while the AGENTS still run for real."
+            )
+        observations = _run_live_episode(args)
+    elif args.from_jsonl is not None:
         records = load_records(args.from_jsonl)
         observations = run_from_records(
             records,
@@ -661,13 +687,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             stub_nli=args.stub_nli,
             stub_judge=args.stub_judge,
             strategy=args.strategy,
+            nli_model=args.nli_model,
         )
     else:
-        print(
-            "[input] no --from-jsonl and no outputs/demo_logs.jsonl; "
-            "running a LIVE episode (needs Ollama)."
-        )
-        observations = _run_live_episode(args)
+        # No explicit source: prefer a saved last run (main.py writes
+        # outputs/last_run.jsonl); otherwise fall back to the demo.
+        last_run = Path("outputs/last_run.jsonl")
+        demo = Path("outputs/demo_logs.jsonl")
+        if last_run.exists():
+            args.from_jsonl = last_run
+        elif demo.exists():
+            args.from_jsonl = demo
+        else:
+            args.from_jsonl = None
+
+        if args.from_jsonl is not None:
+            print(f"[input] no source given; using {args.from_jsonl}")
+            records = load_records(args.from_jsonl)
+            observations = run_from_records(
+                records,
+                stub_encoder=args.stub,
+                stub_nli=args.stub_nli,
+                stub_judge=args.stub_judge,
+                strategy=args.strategy,
+                nli_model=args.nli_model,
+            )
+        else:
+            print(
+                "[input] no --live, no --from-jsonl, and no saved run; "
+                "running a LIVE episode (needs Ollama)."
+            )
+            observations = _run_live_episode(args)
 
     dashboard = build_dashboard_rows(
         observations, strategy=args.strategy
@@ -681,43 +731,87 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 def _run_live_episode(args) -> list[Any]:
+    """Run a REAL episode and observe each response through the tiered
+    pipeline.
+
+    The AGENTS run for real (Ollama via agents.llm); Tier 1/2/3 use
+    whatever the stub flags selected (real by default). Evidence for
+    each response is linked one hop back from the observable artifacts
+    via EvidenceLinker (Task J).
+    """
+
     from environment.mas_environment import MASEnvironment
     from security.observer import SecurityObserver
+    from security.evidence_linker import EvidenceLinker
+
+    stubbed = []
+    if args.stub:
+        stubbed.append("encoder")
+    if args.stub_nli:
+        stubbed.append("nli")
+    if args.stub_judge:
+        stubbed.append("judge")
+    print(
+        "[live] real agents via Ollama; "
+        f"tier stubs: {', '.join(stubbed) if stubbed else 'NONE (all real)'}"
+    )
 
     observer = SecurityObserver(
         semantic_assessor=_build_assessor(args.stub),
-        contradiction_checker=_build_nli_checker(args.stub_nli),
+        contradiction_checker=_build_nli_checker(
+            args.stub_nli, getattr(args, "nli_model", None)
+        ),
         llm_judge=_build_judge(args.stub_judge),
         resource_allocator=_build_allocator(args.strategy),
-        log_enabled=False,
+        log_enabled=True,
     )
     environment = MASEnvironment(
         topology_name=args.topology, security_observer=observer
     )
+
+    # Optionally swap external tools for the in-memory stubs so the real
+    # agent run completes without a Tavily key / network. The agents and
+    # the NLI/judge tiers still run for real.
+    if getattr(args, "stub_tools", False):
+        from experiments.eval_detector import _stub_tools
+
+        _stub_tools(environment)
+        print("[live] external tools swapped for in-memory stubs "
+              "(--stub-tools); no network needed for search.")
+
+    print(f"[live] executing task (topology={args.topology})...")
     environment.execute_task(args.task)
 
-    # Drive the tiered path per response, using the observable artifacts
-    # actually delivered to each agent (one hop back; see Task J).
+    # Link evidence one hop back from the observable artifacts per
+    # agent (Task J), then run the tiered observer per response.
+    linker = EvidenceLinker(observer.semantic_assessor)
     artifacts = environment.get_observable_artifacts()
 
     observations = []
     for base in environment.security_observations:
-        evidence_chunks = [
-            artifact.get("text") or ""
+        artifacts_for_agent = [
+            artifact
             for artifact in artifacts
             if artifact.get("receiver") == base.agent_id
         ]
+        response_text = (
+            base.response if isinstance(base.response, str) else str(base.response)
+        )
+        linked = linker.link_to_artifacts(response_text, artifacts_for_agent, top_k=1)
+        evidence_chunks = [link.candidate.text for link in linked]
+
         observations.append(
             observer.observe_tiered(
                 agent_id=base.agent_id,
-                response=base.response
-                if isinstance(base.response, str) else str(base.response),
+                response=response_text,
                 original_task=base.original_task,
                 assigned_subtask=base.assigned_subtask,
                 evidence_chunks=evidence_chunks,
                 events=[],
             )
         )
+
+    print(f"[live] observed {len(observations)} agent response(s).")
     return observations
 
 
