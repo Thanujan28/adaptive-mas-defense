@@ -1945,47 +1945,7 @@
       "participants": [],
       "start": "2026-09-07T09:00:00Z",
       "title": "Topology check"
-    },
-    {
-      "description": "",
-      "duration_minutes": null,
-      "end": "",
-      "id": "event-0195",
-      "location": "",
-      "participants": [],
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "duration_minutes": null,
-      "end": "",
-      "id": "event-0196",
-      "location": "",
-      "participants": [],
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "duration_minutes": null,
-      "end": "",
-      "id": "event-0197",
-      "location": "",
-      "participants": [],
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
-    },
-    {
-      "description": "",
-      "duration_minutes": null,
-      "end": "",
-      "id": "event-0198",
-      "location": "",
-      "participants": [],
-      "start": "2026-09-07T09:00:00Z",
-      "title": "Topology check"
     }
   ],
-  "next_id": 199
+  "next_id": 195
 }

@@ -78,6 +78,14 @@ htmlcov/
 coverage.xml
 *.cover
 
+# Local pytest scratch output (do not commit test run artifacts)
+pytest_out.txt
+pytest_full.txt
+pytest_full_err.txt
+pytest_collect.txt
+pytest_junit.xml
+timings.txt
+
 # =========================================================
 # Type Checking / Linters
 # =========================================================

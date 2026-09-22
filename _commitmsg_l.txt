@@ -1,0 +1,47 @@
+taskL: tiered pipeline in SecurityObserver + chunk-level log fields
+
+NOTE ON A STRAY COMMIT (important):
+While this task was in progress, a commit `2732a3a` ("add NLI and chunking
+semantic search") was created by thanuNa98 <thanujanvijayachandran@...>
+-- NOT by me -- which swept my in-progress Task L working-tree changes
+together with untracked test-scratch files (pytest_full.txt,
+pytest_full_err.txt, pytest_junit.xml) and a test-polluted
+configs/mock_calendar.json into one un-prefixed commit. This commit
+performs the cleanup that should have accompanied that change: it removes
+the tracked scratch files, restores configs/mock_calendar.json to its
+pre-test state (c4302ef), and adds the pytest scratch names to
+.gitignore so this cannot recur. The Task L source itself
+(security/observer.py, tests/test_tiered_pipeline.py,
+experiments/show_security_logs.py) is correct; it is only its commit
+provenance that was wrong.
+
+WHAT TASK L ADDS
+----------------
+security/observer.py:
+  * observe() is UNCHANGED (compatibility preserved).
+  * observe_tiered(): Tier 1 (chunked semantic, Task H) + Tier 2
+    (existing regex/content detector + NLI contradiction, Tasks I/J)
+    run unconditionally on every chunk; Tier 3 (Task K judge) runs ONLY
+    on chunks whose Tier-2 contradiction confidence exceeds the NAMED
+    constant TIER3_CONTRADICTION_THRESHOLD (=0.60) -- no inline magic
+    number.
+  * ChunkDecision records, per chunk, which tiers ran and their outputs.
+  * TieredObservation carries the per-response summary plus a
+    per-episode tier3_invocations counter (reset_tier_counters()).
+  * A security_state_chunks log line adds worst_chunk_deviation,
+    contradiction_flagged_chunks and tier3_invocations. The base
+    security_state line is emitted byte-for-byte unchanged, and the new
+    chunk fields are APPENDED as named key=value pairs.
+
+LOG-PARSER CHECK (required by the task): nothing in the repo parses the
+security_state log line into fields -- experiments/show_security_logs.py
+prints records verbatim and main.py prints its own computed summary, so
+the unchanged base line plus an appended summary cannot break a reader.
+experiments/show_security_logs.py was still extended to DISPLAY the new
+chunk-level summary (a --tiered mode), so the tool reflects the new
+fields.
+
+Tests: tests/test_tiered_pipeline.py (8 tests: gating above/below the
+threshold, no-evidence path, tier1-always-runs, counter accumulate/reset,
+log fields present + base line unchanged, observe() unchanged, ground-truth
+rejection). Full suite: 194 passed, 48 subtests passed.
