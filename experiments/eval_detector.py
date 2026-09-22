@@ -56,6 +56,12 @@ from attacks.scenarios import (
 )
 from evaluation.labels import OutcomeJudge, exposure_labels
 from evaluation.payload_variants import PAYLOAD_VARIANTS
+from security.resource_allocator import (
+    ALL_STRATEGIES,
+    AllocationState,
+    AllocationStrategy,
+    ResourceAllocator,
+)
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 OUTPUT_DIR = Path("outputs")
@@ -171,6 +177,138 @@ def _stub_tools(env) -> None:
         tools["mock_email"] = StubEmail()
 
 
+# =================================================================
+# TIER-2/3 COLLABORATORS (Task N)
+# =================================================================
+
+def _build_nli_checker(stub_nli: bool):
+    """
+    Build the Tier-2 NLI contradiction checker.
+
+    ``--stub-nli`` uses a deterministic, model-free stub so the strategy
+    comparison runs offline. Without it, the real
+    ``ContradictionChecker`` loads the configured NLI model on first use.
+    """
+
+    from security.contradiction_checker import ContradictionChecker
+
+    if stub_nli:
+        print("[nli] using deterministic STUB NLI checker (no download)")
+        return ContradictionChecker(model=_StubNLIModel())
+
+    print("[nli] using the real NLI model (roberta-large-mnli)")
+    return ContradictionChecker()
+
+
+class _StubNLIModel:
+    """
+    Deterministic, download-free NLI stand-in for ``--stub-nli``.
+
+    Mirrors the rule set used by tests: an explicit negation against an
+    asserted term is a contradiction; a shared core-claim term is
+    entailment; otherwise neutral. Used ONLY for offline dry runs.
+    """
+
+    def __call__(self, inputs, truncation=True):
+        premise = str(inputs.get("text", "")).lower()
+        hypothesis = str(inputs.get("text_pair", "")).lower()
+
+        if ("benefit" in hypothesis
+                and any(c in hypothesis for c in ("no ", "not", "never"))
+                and any(c in premise for c in ("benefit", "detect", "response"))):
+            return [
+                {"label": "contradiction", "score": 0.95},
+                {"label": "entailment", "score": 0.03},
+                {"label": "neutral", "score": 0.02},
+            ]
+
+        shared = sum(
+            1 for term in ("detect", "threat", "response", "security", "ai")
+            if term in hypothesis and term in premise
+        )
+        if shared >= 1:
+            return [
+                {"label": "entailment", "score": 0.9},
+                {"label": "neutral", "score": 0.07},
+                {"label": "contradiction", "score": 0.03},
+            ]
+
+        return [
+            {"label": "neutral", "score": 0.85},
+            {"label": "entailment", "score": 0.1},
+            {"label": "contradiction", "score": 0.05},
+        ]
+
+
+def _run_strategy_pass(
+    raw_responses: list[dict],
+    condition: str,
+    topology: str,
+    seed: int,
+    payload_kind: str,
+    assessor: Any,
+    nli_checker: Any,
+    stub_judge: bool,
+    strategy: AllocationStrategy,
+) -> list[StrategySample]:
+    """
+    Drive ``SecurityObserver.observe_tiered()`` once per response for a
+    single allocation strategy, returning REAL per-response Tier-3
+    counts and the fused decision score.
+
+    Reuses the episode's captured responses/evidence -- the episode is
+    NOT re-executed, so the three strategies see identical inputs and
+    differ ONLY in their Tier-3 gating.
+    """
+
+    from security.observer import SecurityObserver
+    from security.llm_judge import LLMJudge
+
+    allocator = ResourceAllocator(
+        strategy,
+        state=AllocationState(),
+    )
+    observer = SecurityObserver(
+        semantic_assessor=assessor,
+        contradiction_checker=nli_checker,
+        llm_judge=LLMJudge(stub=True) if stub_judge else None,
+        resource_allocator=allocator,
+        log_enabled=False,
+    )
+
+    samples: list[StrategySample] = []
+    for raw in raw_responses:
+        tiered = observer.observe_tiered(
+            agent_id=raw["agent_id"],
+            response=raw["response_text"],
+            original_task=raw["assigned_task"],
+            assigned_subtask=raw["assigned_task"],
+            evidence_chunks=raw["evidence_chunks"],
+            events=[],
+        )
+
+        # The tiered path inherits the same rule/semantic fusion as the
+        # untiered path, so the relevant decision score is the fused
+        # security_score of the base observation.
+        samples.append(
+            StrategySample(
+                condition=condition,
+                topology=topology,
+                seed=seed,
+                agent_id=raw["agent_id"],
+                strategy=strategy.value,
+                payload_kind=payload_kind,
+                fused_score=float(tiered.security_score),
+                tier3_invocations=int(tiered.tier3_invocations),
+                exposure_label=raw["exposure_label"],
+                outcome_label=raw["outcome_label"],
+                legacy_label=raw["legacy_label"],
+            )
+        )
+
+    return samples
+
+
 @dataclass
 class ResponseSample:
     condition: str
@@ -187,6 +325,43 @@ class ResponseSample:
     legacy_label: Optional[int] = None
 
 
+@dataclass
+class StrategySample:
+    """
+    One response's per-strategy Tier-3 outcome (Task N).
+
+    ``tier3_invocations`` is the REAL per-response count taken from
+    ``SecurityObserver.observe_tiered()``'s ``TieredObservation`` -- not
+    a simulated number. ``detection_scores`` maps a score-variant name
+    to the fused score computed for this response under the strategy
+    (the tiered path inherits the same 0.45/0.55 fusion as the untiered
+    path, so the fused score is the relevant decision score).
+    """
+
+    condition: str
+    topology: str
+    seed: int
+    agent_id: str
+    strategy: str
+    payload_kind: str
+    fused_score: float
+    tier3_invocations: int
+
+    exposure_label: int = 0
+    outcome_label: Optional[int] = None
+    legacy_label: Optional[int] = None
+
+
+# Estimated-cost model for the Tier-3 judge. These are STATED, named
+# coefficients, used only for the strategy cost comparison in the
+# report -- never for detection. The prompt/response token estimates are
+# conservative defaults; a real run should replace them with measured
+# numbers (see the module docstring).
+TIER3_ESTIMATED_PROMPT_TOKENS = 700
+TIER3_ESTIMATED_COMPLETION_TOKENS = 60
+TIER3_ESTIMATED_LATENCY_SECONDS = 1.5
+
+
 def _run_episode(
     condition: str,
     topology: str,
@@ -199,9 +374,16 @@ def _run_episode(
     payload_kind: str,
     judge: Optional[OutcomeJudge],
     assemble_label: bool = True,
-) -> tuple[list[ResponseSample], Optional[int]]:
+) -> tuple[list[ResponseSample], Optional[int], list[dict]]:
     """
-    Run one episode and return ``(response_samples, episode_label)``.
+    Run one episode and return
+    ``(response_samples, episode_label, raw_responses)``.
+
+    ``raw_responses`` captures, per observed agent response, the inputs
+    needed to drive the tiered path (Task N) WITHOUT re-running the
+    episode: the agent id, the response text, the episode-scoped
+    observable artifacts delivered to that agent (used as Tier-2/3
+    evidence), and the per-response labels.
 
     The semantic assessor is injected into the environment so the same
     (possibly stubbed) encoder is used everywhere.
@@ -248,6 +430,7 @@ def _run_episode(
     assigned_task = getattr(env.episode_state, "task", task) or task
 
     samples: list[ResponseSample] = []
+    raw_responses: list[dict] = []
 
     for observation in env.security_observations:
 
@@ -295,7 +478,27 @@ def _run_episode(
 
         samples.append(sample)
 
-    return samples, episode_label
+        # Capture the inputs the later tiered/strategy pass needs, so it
+        # can run WITHOUT re-executing the episode. Evidence for a
+        # response is the episode-scoped observable artifacts actually
+        # delivered TO this agent (one-hop-back candidates; see Task J).
+        raw_responses.append(
+            {
+                "agent_id": observation.agent_id,
+                "response_text": response_text,
+                "assigned_task": assigned_task,
+                "evidence_chunks": [
+                    artifact.get("text") or ""
+                    for artifact in env.get_observable_artifacts()
+                    if artifact.get("receiver") == observation.agent_id
+                ],
+                "exposure_label": sample.exposure_label,
+                "outcome_label": sample.outcome_label,
+                "legacy_label": sample.legacy_label,
+            }
+        )
+
+    return samples, episode_label, raw_responses
 
 
 def _content_score(detector_result: dict) -> float:
@@ -443,15 +646,23 @@ def run_evaluation(
     stub_judge: bool,
     stub_llm: bool,
     include_variants: bool = True,
-) -> tuple[list[dict], list[dict]]:
+    stub_nli: bool = False,
+) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Returns ``(response_rows, episode_rows)`` ready for CSV.
+    Returns ``(response_rows, episode_rows, strategy_rows)`` ready for CSV.
+
+    ``strategy_rows`` is the Task-N addition: one row per
+    (strategy, label, payload-kind, score-variant) with AUROC /
+    TPR@5%FPR, plus the real Tier-3 invocation count and estimated
+    cost, and the formula-vs-brute-force recovery/cost ratio.
     """
 
     judge = _build_judge(stub_judge) if not stub_llm else _build_judge(True)
     assessor_holder: dict[str, Any] = {"assessor": None}
+    nli_checker = _build_nli_checker(stub_nli)
 
     all_samples: list[ResponseSample] = []
+    all_strategy_samples: list[StrategySample] = []
     episode_labels: list[tuple] = []
 
     for condition in IMPLEMENTED_CONDITIONS:
@@ -467,7 +678,7 @@ def run_evaluation(
                     ]
 
                 for payload_kind, payload in payloads:
-                    samples, episode_label = _run_episode(
+                    samples, episode_label, raw_responses = _run_episode(
                         condition=condition,
                         topology=topology,
                         seed=seed,
@@ -483,6 +694,23 @@ def run_evaluation(
                     episode_labels.append(
                         (condition, topology, seed, payload_kind, episode_label)
                     )
+
+                    # ---- Task-N: run all three strategies over the SAME
+                    # responses (no episode re-execution). ----
+                    for strategy in ALL_STRATEGIES:
+                        all_strategy_samples.extend(
+                            _run_strategy_pass(
+                                raw_responses=raw_responses,
+                                condition=condition,
+                                topology=topology,
+                                seed=seed,
+                                payload_kind=payload_kind,
+                                assessor=assessor_holder["assessor"],
+                                nli_checker=nli_checker,
+                                stub_judge=stub_judge or stub_llm,
+                                strategy=strategy,
+                            )
+                        )
 
     # ---- response-level rows ----
     response_rows: list[dict] = []
@@ -577,7 +805,182 @@ def run_evaluation(
                 }
             )
 
-    return response_rows, episode_rows
+    # ---- Task-N: strategy rows ----
+    strategy_rows = _build_strategy_rows(all_strategy_samples)
+
+    return response_rows, episode_rows, strategy_rows
+
+
+def _build_strategy_rows(
+    all_strategy_samples: list[StrategySample],
+) -> list[dict]:
+    """
+    Build the per-strategy comparison rows (Task N).
+
+    For each strategy:
+      * AUROC and TPR@5%FPR against ``exposure`` and ``outcome_judge``,
+        with ``indicator_legacy`` reported SEPARATELY (still labelled
+        circularity-inflation reference only);
+      * original vs held-out-variant vs clean payload kinds, split as
+        the untiered path already does;
+      * the REAL Tier-3 invocation count (from observe_tiered) and the
+        estimated token/latency cost derived from it;
+      * aggregate formula-vs-brute-force: AUROC recovered ratio and
+        Tier-3 cost fraction.
+    """
+
+    rows: list[dict] = []
+
+    for strategy in ALL_STRATEGIES:
+        strategy_samples = [
+            s for s in all_strategy_samples if s.strategy == strategy.value
+        ]
+        if not strategy_samples:
+            continue
+
+        # Total real Tier-3 invocations for this strategy.
+        total_tier3 = sum(s.tier3_invocations for s in strategy_samples)
+        estimated_tokens = total_tier3 * (
+            TIER3_ESTIMATED_PROMPT_TOKENS + TIER3_ESTIMATED_COMPLETION_TOKENS
+        )
+        estimated_latency = total_tier3 * TIER3_ESTIMATED_LATENCY_SECONDS
+
+        for label_attr, label_name in (
+            ("exposure_label", "exposure"),
+            ("outcome_label", "outcome_judge"),
+            ("legacy_label", "indicator_legacy"),
+        ):
+            for payload_kind in ("original", "variants", "clean", "all"):
+                if payload_kind == "variants":
+                    group = [
+                        s for s in strategy_samples
+                        if s.payload_kind.startswith("variant:")
+                    ]
+                elif payload_kind == "all":
+                    group = list(strategy_samples)
+                else:
+                    group = [
+                        s for s in strategy_samples
+                        if s.payload_kind == payload_kind
+                    ]
+
+                if not group:
+                    continue
+
+                scores = [s.fused_score for s in group]
+                labels = [
+                    getattr(s, label_attr) for s in group
+                    if getattr(s, label_attr) is not None
+                ]
+
+                group_tier3 = sum(s.tier3_invocations for s in group)
+
+                rows.append(
+                    {
+                        "strategy": strategy.value,
+                        "label": label_name,
+                        "payload": payload_kind,
+                        "score_variant": "fused",
+                        "auroc": (
+                            auroc(scores, labels) if labels else float("nan")
+                        ),
+                        "tpr_at_5fpr": (
+                            tpr_at_fpr(scores, labels)
+                            if labels else float("nan")
+                        ),
+                        "n": len(group),
+                        "positives": int(sum(labels)) if labels else 0,
+                        "tier3_invocations": group_tier3,
+                        "estimated_tokens": group_tier3 * (
+                            TIER3_ESTIMATED_PROMPT_TOKENS
+                            + TIER3_ESTIMATED_COMPLETION_TOKENS
+                        ),
+                        "estimated_latency_seconds": (
+                            group_tier3 * TIER3_ESTIMATED_LATENCY_SECONDS
+                        ),
+                        "note": (
+                            "circularity-inflation reference only"
+                            if label_name == "indicator_legacy"
+                            else ""
+                        ),
+                    }
+                )
+
+        # ---- formula vs brute_force headline ratios (exposure, all
+        #      payload kinds) ----
+        if strategy in (
+            AllocationStrategy.FORMULA,
+            AllocationStrategy.BRUTE_FORCE,
+        ):
+            pass  # computed once, below
+
+    # Aggregate ratio rows: formula AUROC recovered vs brute_force, and
+    # formula cost as a fraction of brute_force cost.
+    ratio_rows = _strategy_ratio_rows(rows)
+    rows.extend(ratio_rows)
+
+    return rows
+
+
+def _strategy_ratio_rows(rows: list[dict]) -> list[dict]:
+    """
+    Compute the formula-vs-brute-force headline ratios over the
+    'all payloads' rows for the exposure label.
+    """
+
+    def _find(strategy: str) -> Optional[dict]:
+        for row in rows:
+            if (
+                row["strategy"] == strategy
+                and row["label"] == "exposure"
+                and row["payload"] == "all"
+            ):
+                return row
+        return None
+
+    formula = _find(AllocationStrategy.FORMULA.value)
+    brute = _find(AllocationStrategy.BRUTE_FORCE.value)
+
+    if formula is None or brute is None:
+        return []
+
+    formula_cost = formula["tier3_invocations"]
+    brute_cost = brute["tier3_invocations"]
+
+    auroc_ratio = float("nan")
+    if brute["auroc"] and not np.isnan(brute["auroc"]):
+        auroc_ratio = formula["auroc"] / brute["auroc"]
+
+    cost_fraction = float("nan")
+    if brute_cost:
+        cost_fraction = formula_cost / brute_cost
+
+    return [
+        {
+            "strategy": "formula_vs_brute_force",
+            "label": "exposure",
+            "payload": "all",
+            "score_variant": "fused",
+            "auroc": auroc_ratio,
+            "tpr_at_5fpr": "",
+            "n": "",
+            "positives": "",
+            # This column holds the formula COST FRACTION of brute_force
+            # (formula_cost / brute_cost); the formula absolute costs are
+            # in estimated_tokens / estimated_latency_seconds.
+            "tier3_invocations": cost_fraction,
+            "estimated_tokens": formula["estimated_tokens"],
+            "estimated_latency_seconds": formula[
+                "estimated_latency_seconds"
+            ],
+            "note": (
+                "auroc column = formula AUROC / brute_force AUROC; "
+                "tier3_invocations column = formula cost fraction of "
+                f"brute_force ({formula_cost}/{brute_cost} = "
+                f"{cost_fraction})"
+            ),
+        }
+    ]
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
@@ -629,6 +1032,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Run episodes with a stub LLM and stub tools (offline).",
     )
     parser.add_argument(
+        "--stub-nli",
+        action="store_true",
+        help="Deterministic stub NLI contradiction checker (no download).",
+    )
+    parser.add_argument(
         "--no-variants",
         action="store_true",
         help="Skip the held-out payload variants.",
@@ -650,7 +1058,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "--stub-llm for an offline run."
         )
 
-    response_rows, episode_rows = run_evaluation(
+    response_rows, episode_rows, strategy_rows = run_evaluation(
         topologies=args.topologies,
         seeds=args.seeds,
         task=args.task,
@@ -658,11 +1066,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         stub_judge=args.stub_judge,
         stub_llm=args.stub_llm,
         include_variants=not args.no_variants,
+        stub_nli=args.stub_nli,
     )
 
     out_dir = Path(args.out_dir)
     _write_csv(out_dir / "eval_detector_response.csv", response_rows)
     _write_csv(out_dir / "eval_detector_episode.csv", episode_rows)
+    _write_csv(out_dir / "eval_detector_strategy.csv", strategy_rows)
 
     print()
     print("Per-response metrics (label | payload | variant | auroc | "
@@ -679,6 +1089,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     print()
     print("NOTE: 'indicator_legacy' is reported only as circularity "
           "inflation (it is not independent of the attack payload).")
+
+    # ---- Task-N strategy comparison ----
+    print()
+    print("Per-strategy Tier-3 comparison "
+          "(strategy | label | payload | auroc | tier3 | est_tokens):")
+    for row in strategy_rows:
+        if row["strategy"] == "formula_vs_brute_force":
+            print(
+                f"  {str(row['strategy']):22s} | "
+                f"{str(row['label']):17s} | {str(row['payload']):10s} | "
+                f"auroc_recovered={row['auroc']} | "
+                f"cost_fraction_of_brute_force="
+                f"{row['tier3_invocations']}"
+            )
+            continue
+        print(
+            f"  {str(row['strategy']):22s} | "
+            f"{str(row['label']):17s} | {str(row['payload']):10s} | "
+            f"auroc={row['auroc']} tpr@5fpr={row['tpr_at_5fpr']} "
+            f"tier3={row['tier3_invocations']} "
+            f"est_tokens={row['estimated_tokens']}"
+        )
+
+    print()
+    print("NOTE: 'indicator_legacy' rows are circularity-inflation "
+          "references only. Tier-3 counts come from "
+          "observe_tiered(); token/latency figures are ESTIMATES from "
+          "named coefficients, not measured numbers.")
 
     print()
     print(f"CSVs written to {out_dir}/")

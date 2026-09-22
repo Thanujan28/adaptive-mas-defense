@@ -19,6 +19,11 @@ from .contradiction_checker import (
     LABEL_CONTRADICTION,
 )
 from .llm_judge import LLMJudge, JudgeVerdict
+from .resource_allocator import (
+    AllocationStrategy,
+    ResourceAllocator,
+    InvestigationRequest,
+)
 from environment.visibility import assert_no_ground_truth
 
 logger = logging.getLogger(__name__)
@@ -163,6 +168,7 @@ class SecurityObserver:
         contradiction_checker: Optional[ContradictionChecker] = None,
         llm_judge: Optional[LLMJudge] = None,
         tier3_contradiction_threshold: float = TIER3_CONTRADICTION_THRESHOLD,
+        resource_allocator: Optional["ResourceAllocator"] = None,
     ) -> None:
 
         self.detector = detector or SecurityDetector()
@@ -179,6 +185,13 @@ class SecurityObserver:
         self.contradiction_checker = contradiction_checker
         self.llm_judge = llm_judge
         self.tier3_contradiction_threshold = tier3_contradiction_threshold
+
+        # Optional investigation-resource allocator (Task M). When set,
+        # observe() routes through the tiered pipeline and attaches the
+        # TieredObservation to metadata["tiered"], while still returning
+        # the SAME Observation object (so every existing caller is
+        # unaffected). When None, observe() behaves exactly as before.
+        self.resource_allocator = resource_allocator
 
         # Per-episode Tier-3 invocation counter. Reset per episode by
         # the caller (or via reset_tier_counters()).
@@ -254,6 +267,30 @@ class SecurityObserver:
         artifacts = list(artifacts) if artifacts is not None else None
 
         metadata = dict(metadata or {})
+
+        # ---------------------------------------------------------
+        # 0a. If an investigation-resource allocator is configured,
+        #     route through the tiered pipeline. observe() still
+        #     returns the SAME Observation object (the tiered result is
+        #     attached to metadata["tiered"]), so every existing caller
+        #     is unaffected. When no allocator is set this branch is
+        #     skipped and the method behaves exactly as before.
+        # ---------------------------------------------------------
+
+        if self.resource_allocator is not None:
+            tiered = self._run_tiered_pipeline(
+                agent_id=agent_id,
+                response=response,
+                original_task=original_task,
+                assigned_subtask=assigned_subtask,
+                events=events,
+                artifacts=artifacts,
+                tool_limit=tool_limit,
+                metadata=metadata,
+                evidence_chunks=None,
+                log=True,
+            )
+            return tiered.base
 
         # ---------------------------------------------------------
         # 0. Strict guard: the observer may only ever see observable
@@ -378,6 +415,45 @@ class SecurityObserver:
         the contradiction axis.
         """
 
+        return self._run_tiered_pipeline(
+            agent_id=agent_id,
+            response=response,
+            original_task=original_task,
+            assigned_subtask=assigned_subtask,
+            events=events,
+            artifacts=artifacts,
+            tool_limit=tool_limit,
+            metadata=metadata,
+            evidence_chunks=evidence_chunks,
+            log=True,
+        )
+
+    def _run_tiered_pipeline(
+        self,
+        *,
+        agent_id: str,
+        response: str,
+        original_task: str,
+        assigned_subtask: str = "",
+        events: Optional[list[Mapping[str, Any]]] = None,
+        artifacts: Optional[list[Mapping[str, Any]]] = None,
+        evidence_chunks: Optional[Sequence[str]] = None,
+        tool_limit: Optional[int] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        log: bool = True,
+    ) -> TieredObservation:
+        """
+        Shared tiered-pipeline implementation used by both
+        ``observe_tiered`` and (when a resource allocator is configured)
+        ``observe``.
+
+        Tier-3 gating honours the configured ``resource_allocator``
+        (Task M) when present: the allocator decides, per chunk, whether
+        Tier 3 runs and with what evidence depth. When no allocator is
+        set, the gate falls back to the named threshold
+        ``tier3_contradiction_threshold`` (Task L behaviour, unchanged).
+        """
+
         events = list(events or [])
         artifacts = list(artifacts) if artifacts is not None else None
         metadata = dict(metadata or {})
@@ -437,20 +513,18 @@ class SecurityObserver:
                 if contradiction.label == LABEL_CONTRADICTION:
                     contradiction_flagged_chunks += 1
 
-                # ---- Tier 3: gated LLM judge ----
-                if (
-                    self.llm_judge is not None
-                    and contradiction.label == LABEL_CONTRADICTION
-                    and contradiction.confidence
-                    > self.tier3_contradiction_threshold
-                ):
-                    decision.tier3_verdict = self.llm_judge.judge(
-                        chunk_text=chunk_text,
-                        evidence_text="\n\n".join(evidence_list),
-                        task=original_task,
-                    )
-                    decision.tiers_ran.append("tier3")
-                    tier3_calls += 1
+                # ---- Tier 3 gating ----
+                if self.llm_judge is not None:
+                    run_tier3, depth = self._gate_tier3(contradiction)
+                    if run_tier3:
+                        evidence_for_judge = evidence_list[:depth]
+                        decision.tier3_verdict = self.llm_judge.judge(
+                            chunk_text=chunk_text,
+                            evidence_text="\n\n".join(evidence_for_judge),
+                            task=original_task,
+                        )
+                        decision.tiers_ran.append("tier3")
+                        tier3_calls += 1
 
             chunk_decisions.append(decision)
 
@@ -489,11 +563,45 @@ class SecurityObserver:
             tier3_invocations=tier3_calls,
         )
 
-        # Reuse the existing security_state log line, extended with the
-        # chunk-level summary fields.
-        self._log_tiered_security_state(tiered)
+        # Attach the tiered result to the base observation's metadata so
+        # a caller that only sees the Observation (e.g. the environment
+        # call site) can still read the per-response Tier-3 count.
+        base.metadata["tiered"] = tiered
+
+        if log:
+            self._log_tiered_security_state(tiered)
 
         return tiered
+
+    def _gate_tier3(
+        self,
+        contradiction: ContradictionResult,
+    ) -> tuple[bool, int]:
+        """
+        Decide whether Tier 3 runs for one chunk and at what evidence
+        depth.
+
+        With a ``resource_allocator`` (Task M) configured, the allocator
+        owns the decision. Without one, the Task-L gate applies: run on
+        a contradiction whose confidence EXCEEDS
+        ``tier3_contradiction_threshold``, with all evidence attached.
+        """
+
+        if self.resource_allocator is not None:
+            request = self.resource_allocator.allocate_for_chunk(
+                contradiction
+            )
+            depth = max(1, request.evidence_depth)
+            if request.run_tier3:
+                self.resource_allocator.record_investigation(request)
+            return request.run_tier3, depth
+
+        run = (
+            contradiction.label == LABEL_CONTRADICTION
+            and contradiction.confidence
+            > self.tier3_contradiction_threshold
+        )
+        return run, 10_000  # all evidence (Task-L behaviour)
 
     # =========================================================
     # SECURITY STATE LOGGING
