@@ -1,6 +1,9 @@
 from environment.mas_environment import MASEnvironment
 from attacks.prompt_infection import PromptInfectionAttack
 from security.logging_config import enable_security_logging
+import json
+from pathlib import Path
+
 
 def main():
 
@@ -75,6 +78,54 @@ def main():
 
     for event in environment.get_observable_events():
         print(event)
+
+    # ---------------------------------------------------------
+    # SAVE THIS RUN FOR THE DASHBOARD
+    #
+    # The dashboard (experiments/security_dashboard.py) runs the tiered
+    # observer (Tier 1 chunked semantic + Tier 2 NLI + Tier 3 judge)
+    # over records. main.py's own observer is the plain one, so we save
+    # exactly what the dashboard needs -- each observed agent response,
+    # its task/subtask, and the observable artifacts delivered to that
+    # agent as evidence -- to a JSONL the dashboard can reopen.
+    # ---------------------------------------------------------
+
+    dump_path = Path("outputs/last_run.jsonl")
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+
+    artifacts = environment.get_observable_artifacts()
+    written = 0
+    with dump_path.open("w", encoding="utf-8") as handle:
+        for observation in environment.security_observations:
+            response = observation.response
+            if not isinstance(response, str):
+                response = str(response or "")
+            evidence = [
+                artifact.get("text") or ""
+                for artifact in artifacts
+                if artifact.get("receiver") == observation.agent_id
+            ]
+            handle.write(
+                json.dumps(
+                    {
+                        "condition": observation.agent_id,
+                        "task": observation.original_task,
+                        "subtask": observation.assigned_subtask
+                        or observation.agent_id,
+                        "output": response,
+                        "evidence": evidence,
+                    }
+                )
+                + "\n"
+            )
+            written += 1
+
+    print(f"\nSaved {written} agent response(s) to {dump_path}")
+    print(
+        "Open the dashboard on this run with:\n"
+        "  python -m experiments.security_dashboard --stub --stub-nli "
+        "--stub-judge --from-jsonl outputs/last_run.jsonl"
+    )
 
 
 def print_security_assessments(environment):
