@@ -146,6 +146,36 @@ def _print_observation(index: int, observation) -> None:
     preview = response if isinstance(response, str) else str(response)
     print(f"  response[:120] = {preview[:120]!r}")
 
+    # If this observation came from the tiered pipeline, print its
+    # chunk-level Tier1/2/3 summary too (added for Task L).
+    tiered = (observation.metadata or {}).get("tiered")
+    if tiered is not None:
+        _print_tiered_summary(tiered)
+
+
+def _print_tiered_summary(tiered) -> None:
+    """
+    Print the chunk-level Tier1/2/3 summary for one tiered observation.
+
+    This teaches the log viewer about the security_state_chunks fields
+    added by the tiered pipeline without changing any existing output.
+    """
+
+    print("  TIERED PIPELINE (chunk-level)")
+    print(f"    worst_chunk_deviation        = {tiered.worst_chunk_deviation:.4f}")
+    print(f"    contradiction_flagged_chunks = {tiered.contradiction_flagged_chunks}")
+    print(f"    tier3_invocations            = {tiered.tier3_invocations}")
+    for decision in tiered.chunk_decisions:
+        verdict = ""
+        if decision.tier3_verdict is not None:
+            verdict = (
+                f" tier3_contradicts={decision.tier3_verdict.contradicts_evidence}"
+            )
+        print(
+            f"      chunk[{decision.chunk_index}] "
+            f"tiers={','.join(decision.tiers_ran)}{verdict}"
+        )
+
 
 def _print_episode_aggregate(environment) -> None:
     aggregate = environment.get_semantic_assessment()
@@ -225,6 +255,21 @@ def _run_from_jsonl(args, assessor):
                 semantic_enabled=not args.semantic_off,
                 log_enabled=True,
             )
+            if getattr(args, "tiered", False):
+                tiered = observer.observe_tiered(
+                    agent_id=record.get("condition", "agent"),
+                    response=str(record.get("output", "")),
+                    original_task=str(record.get("task", "")),
+                    assigned_subtask=str(record.get("subtask", "")),
+                    evidence_chunks=list(record.get("evidence", []) or []),
+                    events=list(record.get("events", [])),
+                )
+                # Attach the tiered summary to the base observation so
+                # the existing printer can render it.
+                tiered.base.metadata["tiered"] = tiered
+                self.observations.append(tiered.base)
+                return
+
             observation = observer.observe(
                 agent_id=record.get("condition", "agent"),
                 response=str(record.get("output", "")),
@@ -308,6 +353,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Inspect pre-collected outputs (no LLM).")
     parser.add_argument("--semantic-off", action="store_true",
                         help="Disable semantic assessment.")
+    parser.add_argument("--tiered", action="store_true",
+                        help="Use the tiered pipeline (Task L) and print "
+                             "the per-chunk Tier1/2/3 summary.")
     parser.add_argument("--with-logging", action="store_true",
                         help="Also print raw security_state log records.")
     parser.add_argument("--write-template", action="store_true",
