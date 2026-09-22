@@ -1,7 +1,9 @@
 from environment.mas_environment import MASEnvironment
 from attacks.prompt_infection import PromptInfectionAttack
 from security.logging_config import enable_security_logging
+from security.live_events import LiveEventPublisher
 import json
+import os
 from pathlib import Path
 
 
@@ -16,8 +18,23 @@ def main():
     print("Adaptive MAS Defense - Prompt Infection Test")
     print("=" * 60)
 
+    # ---------------------------------------------------------
+    # LIVE EVENT STREAM (optional, for the Streamlit dashboard)
+    #
+    # Set MAS_LIVE_EVENTS=0 to disable. When enabled (default), the
+    # experiment appends observable events to outputs/live_events.jsonl
+    # so streamlit_app.py can watch THIS run live. Publishing is
+    # non-blocking and failure-isolated: if the file cannot be written,
+    # the experiment continues exactly as before.
+    # ---------------------------------------------------------
+
+    publisher = None
+    if os.getenv("MAS_LIVE_EVENTS", "1") != "0":
+        publisher = LiveEventPublisher()
+
     environment = MASEnvironment(
         topology_name="shared_pool",
+        event_publisher=publisher,
     )
 
     print("\nCommunication topology:")
@@ -28,6 +45,18 @@ def main():
     if not task:
         print("Error: Task cannot be empty.")
         return
+
+    if publisher is not None:
+        publisher.start_run(
+            task=task,
+            topology="shared_pool",
+        )
+        print(
+            "\n[live] streaming events to outputs/live_events.jsonl "
+            "(run_id=%s)" % publisher.run_id
+        )
+        print("[live] start the dashboard in another terminal:")
+        print("       streamlit run streamlit_app.py")
 
     # ---------------------------------------------------------
     # CREATE PROMPT INFECTION ATTACK
@@ -51,9 +80,18 @@ def main():
     print("\nExecuting task...")
     print("-" * 60)
 
-    result = environment.execute_task(
-        task=task,
-    )
+    try:
+        result = environment.execute_task(
+            task=task,
+        )
+    except Exception as exc:
+        # Record the failure for the dashboard, then re-raise so the
+        # experiment's own error behaviour is unchanged.
+        if publisher is not None:
+            publisher.finish_run(
+                status="failed", error=f"{type(exc).__name__}: {exc}"
+            )
+        raise
 
     print("\nFinal result:")
     print(result)
@@ -126,6 +164,21 @@ def main():
         "  python -m experiments.security_dashboard --stub --stub-nli "
         "--stub-judge --from-jsonl outputs/last_run.jsonl"
     )
+
+    # ---------------------------------------------------------
+    # LIVE EVENT STREAM: mark the run complete
+    # ---------------------------------------------------------
+
+    if publisher is not None:
+        publisher.finish_run(
+            status="completed",
+            metadata={
+                "agents_observed": len(environment.security_observations),
+                "budget": environment.resource_budget.as_dict(),
+            },
+        )
+        print("[live] run complete; events retained in "
+              "outputs/live_events.jsonl")
 
 
 def print_security_assessments(environment):

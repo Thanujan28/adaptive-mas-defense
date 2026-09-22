@@ -230,7 +230,19 @@ class MASEnvironment:
         attack_simulator=None,
         security_observer=None,
         semantic_enabled=True,
+        event_publisher=None,
     ):
+
+        # =====================================================
+        # LIVE EVENT STREAM (OPTIONAL)
+        #
+        # An optional, non-blocking publisher (security/live_events.py)
+        # forwards observable events to a file for a live dashboard.
+        # When None, the environment behaves EXACTLY as before: no events
+        # are published and no I/O happens. It never affects decisions.
+        # =====================================================
+
+        self.event_publisher = event_publisher
 
         # =====================================================
         # AGENT DEFINITIONS
@@ -693,6 +705,37 @@ class MASEnvironment:
             )
 
         self.events.append(event)
+
+        # -----------------------------------------------------
+        # LIVE EVENT STREAM (optional, non-blocking)
+        #
+        # Forward this event to the dashboard publisher if one is
+        # attached. Purely observational: it does not read or change
+        # any experiment state, and a disabled/None publisher is a no-op.
+        # -----------------------------------------------------
+        if self.event_publisher is not None:
+            try:
+                self.event_publisher.emit(
+                    "mas_event",
+                    {
+                        "event_type": event.event_type,
+                        "sender": event.sender,
+                        "receiver": event.receiver,
+                        "content": event.content,
+                        "tool_call": event.tool_call,
+                        "memory_update": event.memory_update,
+                        "token_usage": event.token_usage,
+                        "request_id": event.request_id,
+                        "episode_id": event.episode_id,
+                        "result_count": event.result_count,
+                        "visibility": event.visibility,
+                        "metadata": event.metadata,
+                        "timestamp": event.timestamp,
+                    },
+                )
+            except Exception:
+                # Streaming must never affect the experiment.
+                pass
 
         print(
             "\n" + "-" * 70
@@ -3394,6 +3437,62 @@ class MASEnvironment:
             observation
         )
 
+        # -----------------------------------------------------
+        # LIVE EVENT STREAM: security observation for this agent
+        #
+        # Purely observational. Only fields the observer already
+        # computed are published (no fabricated metrics).
+        # -----------------------------------------------------
+        if self.event_publisher is not None:
+            try:
+                assessment = observation.semantic_assessment
+                self.event_publisher.emit(
+                    "security_observation",
+                    {
+                        "agent_id": observation.agent_id,
+                        "assigned_subtask": observation.assigned_subtask,
+                        "security_score": observation.security_score,
+                        "investigation_required":
+                            observation.investigation_required,
+                        "semantic_assessed": bool(
+                            assessment and assessment.assessed
+                        ),
+                        "task_similarity": (
+                            assessment.task_similarity
+                            if assessment and assessment.assessed else None
+                        ),
+                        "subtask_similarity": (
+                            assessment.subtask_similarity
+                            if assessment and assessment.assessed else None
+                        ),
+                        "deviation_score": (
+                            assessment.deviation_score
+                            if assessment and assessment.assessed else None
+                        ),
+                        "semantic_confidence": (
+                            assessment.confidence
+                            if assessment and assessment.assessed else None
+                        ),
+                        "detector_result": {
+                            key: observation.detector_result.get(key)
+                            for key in (
+                                "evidence_present",
+                                "injection_evidence_count",
+                                "high_confidence_evidence_count",
+                                "untrusted_source_evidence_count",
+                                "tool_timeout_count",
+                            )
+                        },
+                        "response_preview": (
+                            observation.response[:240]
+                            if isinstance(observation.response, str)
+                            else str(observation.response)[:240]
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+
         return observation
 
     def publish_agent_result(
@@ -3659,6 +3758,25 @@ class MASEnvironment:
             )
 
         # =====================================================
+        # LIVE EVENT STREAM: episode started
+        # =====================================================
+
+        if self.event_publisher is not None:
+            try:
+                self.event_publisher.emit(
+                    "episode_started",
+                    {
+                        "task": task,
+                        "topology": self.topology_name,
+                        "episode_id": self.episode_state.episode_id,
+                        "agents": list(self.agent_names),
+                        "budget": self.resource_budget.as_dict(),
+                    },
+                )
+            except Exception:
+                pass
+
+        # =====================================================
         # INITIAL LANGGRAPH STATE
         # =====================================================
 
@@ -3685,13 +3803,44 @@ class MASEnvironment:
 
         # =====================================================
         # EXECUTE GRAPH
+        #
+        # The graph call is unchanged. The live-event wrapper below
+        # only OBSERVES success/failure and re-raises any exception
+        # unchanged, so experiment behaviour is identical.
         # =====================================================
 
-        result = self.graph.invoke(
-            initial_state
-        )
+        try:
+            result = self.graph.invoke(
+                initial_state
+            )
+        except Exception as exc:
+            if self.event_publisher is not None:
+                try:
+                    self.event_publisher.emit(
+                        "episode_failed",
+                        {
+                            "episode_id": self.episode_state.episode_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                except Exception:
+                    pass
+            raise
 
         self.episode_state.result = result
+
+        if self.event_publisher is not None:
+            try:
+                self.event_publisher.emit(
+                    "episode_completed",
+                    {
+                        "episode_id": self.episode_state.episode_id,
+                        "budget": self.resource_budget.as_dict(),
+                        "agent_count": len(self.security_observations),
+                    },
+                )
+            except Exception:
+                pass
 
         return result[
             "final_result"
