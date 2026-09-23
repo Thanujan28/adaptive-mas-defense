@@ -519,7 +519,7 @@ class EndToEndPublishSchemaTests(unittest.TestCase):
     without running any LLM.
     """
 
-    def _run_episode(self, tmp: Path):
+    def _run_episode(self, tmp: Path, observer=None):
         from environment.mas_environment import MASEnvironment
         from security.observer import SecurityObserver
         from security.contradiction_checker import ContradictionChecker
@@ -533,7 +533,6 @@ class EndToEndPublishSchemaTests(unittest.TestCase):
         import agents.researcher as researcher_module
         import agents.analyst as analyst_module
         import agents.executor as executor_module
-
         # Deterministic NLI stub: no download, but Tier 2 really runs.
         class _StubNLI:
             def __call__(self, inputs, truncation=True):
@@ -551,7 +550,6 @@ class EndToEndPublishSchemaTests(unittest.TestCase):
         originals = [(m, m.get_llm) for m in mods]
         for m in mods:
             m.get_llm = lambda: stub
-
         try:
             publisher = LiveEventPublisher(
                 events_path=tmp / "live_events.jsonl",
@@ -559,10 +557,13 @@ class EndToEndPublishSchemaTests(unittest.TestCase):
             )
             publisher.start_run(task="T", topology="shared_pool")
 
-            observer = SecurityObserver(
-                semantic_assessor=SemanticAssessor(model=StubEncoder()),
-                contradiction_checker=ContradictionChecker(model=_StubNLI()),
-            )
+            if observer is None:
+                observer = SecurityObserver(
+                    semantic_assessor=SemanticAssessor(model=StubEncoder()),
+                    contradiction_checker=ContradictionChecker(
+                        model=_StubNLI()
+                    ),
+                )
             env = MASEnvironment(
                 topology_name="shared_pool",
                 event_publisher=publisher,
@@ -672,11 +673,96 @@ class EndToEndPublishSchemaTests(unittest.TestCase):
         # _model is None until first use -> real transformers pipeline.
         self.assertIsNone(checker._model)
         self.assertEqual(checker.model_name, "roberta-large-mnli")
+        # Explicit provenance: the default checker is REAL, not a stub.
+        # This is the supported way to tell them apart -- _model becomes
+        # non-None on a real run once the pipeline loads.
+        self.assertFalse(checker.is_stub)
+        self.assertEqual(checker.source, "real")
 
         # Tier 3 is gated off by default (MAS_TIER3_JUDGE unset here).
         import os
         self.assertIsNone(env.security_observer.llm_judge)
         self.assertEqual(os.getenv("MAS_TIER3_JUDGE", "0"), "0")
+
+    def test_real_checker_is_published_as_real_not_stub(self):
+        # REGRESSION: a checker built with the default constructor uses
+        # the REAL NLI model. Once the lazy transformers pipeline has
+        # loaded, ``_model`` is non-None -- which must NOT flip the
+        # published provenance to ``stub``. A run whose NLI is REAL must
+        # publish ``tier2_source == 'real'``.
+        #
+        # To keep this download-free, we wire a real-provenance checker
+        # (``source == 'real'``) whose loaded ``_model`` is a
+        # deterministic stub, exactly reproducing the post-load state of
+        # a real run.
+        from security.observer import SecurityObserver
+        from security.contradiction_checker import ContradictionChecker
+        from security.semantic_assessor import SemanticAssessor
+        from tests.conftest import StubEncoder
+        class _FakeModel:
+            def __call__(self, inputs, truncation=True):
+                return [
+                    {"label": "neutral", "score": 0.6},
+                    {"label": "entailment", "score": 0.3},
+                    {"label": "contradiction", "score": 0.1},
+                ]
+
+        real_checker = ContradictionChecker()          # source == 'real'
+        real_checker._model = _FakeModel()             # simulate loaded
+        observer = SecurityObserver(
+            semantic_assessor=SemanticAssessor(model=StubEncoder()),
+            contradiction_checker=real_checker,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            events = self._run_episode(Path(d), observer=observer)
+
+        observations = [
+            e for e in events if e.get("event_type") == "security_observation"
+        ]
+        self.assertTrue(observations)
+        for event in observations:
+            tiered = event["payload"]["tiered"]
+            self.assertEqual(tiered.get("tier2_source"), "real")
+            for chunk in tiered["chunks"]:
+                nli = chunk["tier2_nli"]
+                if nli.get("ran"):
+                    self.assertEqual(nli.get("source"), "real")
+
+        # The dashboard helper agrees: the run reads as REAL NLI.
+        self.assertEqual(dash.tier2_source_of_events(events), "real")
+
+    def test_stub_checker_is_published_as_stub(self):
+        # An injected-model checker must publish tier2_source == 'stub'.
+        from security.observer import SecurityObserver
+        from security.contradiction_checker import ContradictionChecker
+        from security.semantic_assessor import SemanticAssessor
+        from tests.conftest import StubEncoder
+        class _StubNLI:
+            def __call__(self, inputs, truncation=True):
+                return [
+                    {"label": "neutral", "score": 0.6},
+                    {"label": "entailment", "score": 0.3},
+                    {"label": "contradiction", "score": 0.1},
+                ]
+
+        observer = SecurityObserver(
+            semantic_assessor=SemanticAssessor(model=StubEncoder()),
+            contradiction_checker=ContradictionChecker(model=_StubNLI()),
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            events = self._run_episode(Path(d), observer=observer)
+
+        observations = [
+            e for e in events if e.get("event_type") == "security_observation"
+        ]
+        self.assertTrue(observations)
+        for event in observations:
+            tiered = event["payload"]["tiered"]
+            self.assertEqual(tiered.get("tier2_source"), "stub")
+
+        self.assertEqual(dash.tier2_source_of_events(events), "stub")
 
 
 if __name__ == "__main__":

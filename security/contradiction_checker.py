@@ -119,10 +119,29 @@ class ContradictionChecker:
     ) -> None:
         self.model_name = model_name
         self._model = model
+        # PROVENANCE: True only when a model was INJECTED through
+        # ``model=`` (a deterministic test/offline double). This is set
+        # once at construction and never changes, so it stays correct
+        # even after a real model is lazily loaded into ``_model``.
+        #
+        # ``is_stub`` -- NOT ``_model is not None`` -- is the supported
+        # way to tell a real NLI run from a stubbed one: ``_model`` is
+        # also populated by the REAL transformers pipeline on first use.
+        self.is_stub = model is not None
         # Minimum confidence for a contradiction to be reported as such
         # rather than falling back to the next-strongest label. Default
         # 0.0 keeps the raw argmax verdict.
         self.contradiction_floor = contradiction_floor
+    @property
+    def source(self) -> str:
+        # Provenance of this checker's NLI model: "real" or "stub".
+        #
+        # "stub" means a model was injected via ``model=`` (tests /
+        # offline dry runs); "real" means the lazy ``transformers``
+        # pipeline for ``model_name`` (roberta-large-mnli by default) is
+        # -- or will be -- used. This is independent of whether the real
+        # pipeline has been loaded yet, unlike inspecting ``_model``.
+        return "stub" if self.is_stub else "real"
 
     # =========================================================
     # MODEL LOADING

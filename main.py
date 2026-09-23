@@ -120,12 +120,13 @@ def main():
     # ---------------------------------------------------------
     # SAVE THIS RUN FOR THE DASHBOARD
     #
-    # The dashboard (experiments/security_dashboard.py) runs the tiered
-    # observer (Tier 1 chunked semantic + Tier 2 NLI + Tier 3 judge)
-    # over records. main.py's own observer is the plain one, so we save
-    # exactly what the dashboard needs -- each observed agent response,
-    # its task/subtask, and the observable artifacts delivered to that
-    # agent as evidence -- to a JSONL the dashboard can reopen.
+    # The live run already scored every agent response through the
+    # tiered observer (Tier 1 chunked semantic + Tier 2 REAL NLI via
+    # roberta-large-mnli + Tier 3 judge when enabled) -- see
+    # MASEnvironment._observe_agent_response. Here we save what the
+    # offline dashboard needs to reopen the run -- each observed agent
+    # response, its task/subtask, and the observable artifacts delivered
+    # to that agent as evidence -- to a JSONL the dashboard can re-score.
     # ---------------------------------------------------------
 
     dump_path = Path("outputs/last_run.jsonl")
@@ -160,8 +161,14 @@ def main():
 
     print(f"\nSaved {written} agent response(s) to {dump_path}")
     print(
-        "Open the dashboard on this run with:\n"
-        "  python -m experiments.security_dashboard --stub --stub-nli "
+        "Replay this run offline in the dashboard. NOTE: the live run above "
+        "used the REAL NLI model; these dashboard commands only control how "
+        "the saved records are re-scored offline:\n"
+        "  real NLI (roberta-large-mnli):\n"
+        "    python -m experiments.security_dashboard --from-jsonl "
+        "outputs/last_run.jsonl --strategy formula\n"
+        "  offline demo (stub NLI, no download):\n"
+        "    python -m experiments.security_dashboard --stub --stub-nli "
         "--stub-judge --from-jsonl outputs/last_run.jsonl"
     )
 

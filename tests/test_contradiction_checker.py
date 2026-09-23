@@ -258,6 +258,81 @@ class LabelNormalisationTests(unittest.TestCase):
         )
         self.assertEqual(result.label, LABEL_CONTRADICTION)
 
+    def test_roberta_uppercase_labels_are_canonicalised(self):
+        """
+        roberta-large-mnli emits UPPERCASE labels (ENTAILMENT /
+        CONTRADICTION / NEUTRAL). All three must normalise to the
+        canonical lowercase form and preserve their confidence.
+        """
+
+        class _RobertaStyle(_StubNLIModel):
+            def _score(self, premise, hypothesis):
+                return [
+                    {"label": "ENTAILMENT", "score": 0.9892},
+                    {"label": "NEUTRAL", "score": 0.0088},
+                    {"label": "CONTRADICTION", "score": 0.0019},
+                ]
+
+        result = ContradictionChecker(model=_RobertaStyle()).check_contradiction(
+            "a premise", "a hypothesis"
+        )
+        self.assertEqual(result.label, LABEL_ENTAILMENT)
+        self.assertAlmostEqual(result.confidence, 0.9892, places=4)
+
+    def test_roberta_uppercase_contradiction_is_preserved(self):
+        class _RobertaStyle(_StubNLIModel):
+            def _score(self, premise, hypothesis):
+                return [
+                    {"label": "CONTRADICTION", "score": 0.9991},
+                    {"label": "NEUTRAL", "score": 0.0005},
+                    {"label": "ENTAILMENT", "score": 0.0003},
+                ]
+
+        result = ContradictionChecker(model=_RobertaStyle()).check_contradiction(
+            "a premise", "a hypothesis"
+        )
+        self.assertEqual(result.label, LABEL_CONTRADICTION)
+        self.assertTrue(result.is_contradiction)
+        self.assertAlmostEqual(result.confidence, 0.9991, places=4)
+
+
+# =============================================================
+# PROVENANCE (REAL vs STUB)
+# =============================================================
+
+class ProvenanceTests(unittest.TestCase):
+    """
+    The production ``ContradictionChecker()`` must self-identify as REAL
+    so the live stream can label a run REAL/STUB/NOT_RUN. The critical
+    subtlety: ``_model`` becomes non-None on a real run once the lazy
+    transformers pipeline loads, so provenance must NOT be inferred from
+    ``_model``.
+    """
+
+    def test_default_checker_is_real(self):
+        checker = ContradictionChecker()
+        self.assertFalse(checker.is_stub)
+        self.assertEqual(checker.source, "real")
+        self.assertEqual(checker.model_name, "roberta-large-mnli")
+
+    def test_injected_model_is_stub(self):
+        checker = ContradictionChecker(model=_StubNLIModel())
+        self.assertTrue(checker.is_stub)
+        self.assertEqual(checker.source, "stub")
+
+    def test_real_checker_still_real_after_model_load(self):
+        checker = ContradictionChecker()
+        # Simulate the lazy real pipeline having been loaded: _model is
+        # now non-None. Provenance must be unaffected.
+        checker._model = _StubNLIModel()
+        self.assertEqual(checker.source, "real")
+        self.assertFalse(checker.is_stub)
+
+    def test_stub_checker_still_stub_after_use(self):
+        checker = ContradictionChecker(model=_StubNLIModel())
+        checker.check_contradiction("p", "h")
+        self.assertEqual(checker.source, "stub")
+
 
 if __name__ == "__main__":
     unittest.main()

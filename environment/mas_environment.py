@@ -3399,16 +3399,17 @@ class MASEnvironment:
             return []
 
         # Whether Tier 2 used a real NLI pipeline or an injected stub.
-        # A ContradictionChecker with an injected ``_model`` (tests /
-        # offline dry runs) is a STUB; with ``_model is None`` it loads
-        # the real roberta-large-mnli pipeline.
+        # Prefer the checker's explicit ``source`` provenance ("real" /
+        # "stub"), which is fixed at construction. Falling back to
+        # inspecting ``_model`` would be WRONG: ``_model`` is also
+        # populated by the REAL transformers pipeline after first use.
         checker = getattr(self.security_observer, "contradiction_checker", None)
         if checker is None:
             nli_source = "not_run"
-        elif getattr(checker, "_model", None) is not None:
-            nli_source = "stub"
         else:
-            nli_source = "real"
+            nli_source = getattr(checker, "source", None) or (
+                "stub" if getattr(checker, "is_stub", False) else "real"
+            )
 
         judge = getattr(self.security_observer, "llm_judge", None)
         judge_stub = bool(getattr(judge, "stub", False)) if judge else False
@@ -3597,12 +3598,17 @@ class MASEnvironment:
                     self.security_observer, "contradiction_checker", None
                 )
                 _judge = getattr(self.security_observer, "llm_judge", None)
-                tier2_source = (
-                    "not_run"
-                    if _checker is None
-                    else ("stub" if getattr(_checker, "_model", None)
-                          is not None else "real")
-                )
+                # Prefer the checker's explicit provenance flag. Do NOT
+                # infer from ``_model``: the REAL pipeline populates
+                # ``_model`` on first use, so that test would mislabel a
+                # real run as "stub".
+                if _checker is None:
+                    tier2_source = "not_run"
+                else:
+                    tier2_source = getattr(_checker, "source", None) or (
+                        "stub" if getattr(_checker, "is_stub", False)
+                        else "real"
+                    )
                 tier3_status = (
                     "not_run"
                     if _judge is None
