@@ -163,35 +163,12 @@ class LLMJudge:
     # LLM CLIENT
     # =========================================================
 
+# security/llm_judge.py
     def _build_judge_llm(self) -> Any:
-        """
-        Build a DEDICATED temperature-0 judge client.
-
-        Reuses the same Ollama backend parameters as the agents'
-        ``get_llm`` (model, num_gpu, num_ctx, ...) but forces
-        ``temperature=0`` for the judge only. The agents' shared client
-        is never mutated.
-        """
-
-        import os
-
-        from langchain_ollama import ChatOllama
-
-        # If the caller injected a client, use it verbatim (it is
-        # responsible for its own temperature; tests use a stub).
         if self._llm is not None:
             return self._llm
-
-        self._llm = ChatOllama(
-            model=self._model_name
-            or os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
-            temperature=0,  # FORCED for the judge, this client only.
-            num_gpu=int(os.getenv("OLLAMA_NUM_GPU", "0")),
-            num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "4096")),
-            num_thread=int(os.getenv("OLLAMA_NUM_THREAD", "0")) or None,
-            keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", "5m"),
-            top_p=1.0,
-        )
+        from agents.llm import get_llm
+        self._llm = get_llm(temperature=0.0)  # forced, regardless of OLLAMA_TEMPERATURE
         return self._llm
 
     # =========================================================
