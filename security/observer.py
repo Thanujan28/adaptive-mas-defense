@@ -474,11 +474,20 @@ class SecurityObserver:
         )
 
         # ---- Tier 1: chunked semantic assessment ----
-        chunked = self.semantic_assessor.assess_chunked(
-            original_task=original_task,
-            assigned_subtask=assigned_subtask,
-            agent_output=response,
-        )
+        #
+        # Honour ``semantic_enabled`` exactly as the legacy observe()
+        # does: when semantic assessment is switched off, no semantic
+        # work runs (Tier 1 or the fused base), so the state builder
+        # falls back to its neutral defaults -- identical to the old
+        # whole-response path with semantic disabled.
+        if self.semantic_enabled:
+            chunked = self.semantic_assessor.assess_chunked(
+                original_task=original_task,
+                assigned_subtask=assigned_subtask,
+                agent_output=response,
+            )
+        else:
+            chunked = ChunkedSemanticAssessment()
 
         chunk_decisions: list[ChunkDecision] = []
         contradiction_flagged_chunks = 0
@@ -531,11 +540,13 @@ class SecurityObserver:
         self.tier3_invocations += tier3_calls
 
         # ---- Fused base observation (reuses observe()'s scoring) ----
-        base_assessment = self.semantic_assessor.assess(
-            original_task=original_task,
-            assigned_subtask=assigned_subtask,
-            agent_output=response,
-        )
+        base_assessment = None
+        if self.semantic_enabled:
+            base_assessment = self.semantic_assessor.assess(
+                original_task=original_task,
+                assigned_subtask=assigned_subtask,
+                agent_output=response,
+            )
 
         security_score = self._calculate_security_score(
             detector_result=detector_result,

@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import TypedDict, Optional
 
@@ -27,6 +28,8 @@ from environment.resource_accounting import (
     LlamaTokenCounter,
 )
 from security.observer import SecurityObserver
+from security.contradiction_checker import ContradictionChecker
+from security.llm_judge import LLMJudge
 from security.semantic_assessor import SemanticAssessment
 from environment.visibility import sanitize_observable_event
 from attacks.prompt_infection import check_infection_indicators
@@ -275,10 +278,26 @@ class MASEnvironment:
         # =====================================================
 
         self.semantic_enabled = semantic_enabled
+
+        # The live pipeline runs the TIERED detector (observe_tiered),
+        # not the legacy whole-response observe(). Tier 1 (chunked
+        # semantic) and Tier 2 (NLI contradiction vs. linked evidence)
+        # run by default. The expensive Tier-3 LLM judge is GATED: it
+        # stays off unless MAS_TIER3_JUDGE=1 is set, because its accuracy
+        # has not yet been validated against the hand-labelled pilot set
+        # (tests/fixtures/judge_pilot_set.jsonl -- human_label is still
+        # null on every row). Set MAS_TIER3_JUDGE=1 to enable it live.
+        if os.getenv("MAS_TIER3_JUDGE", "0") == "1":
+            tier3_judge = LLMJudge()
+        else:
+            tier3_judge = None
+
         self.security_observer = (
             security_observer
             or SecurityObserver(
                 semantic_enabled=semantic_enabled,
+                contradiction_checker=ContradictionChecker(),
+                llm_judge=tier3_judge,
             )
         )
 
@@ -3362,6 +3381,113 @@ class MASEnvironment:
         self.agent_assignments[agent_id] = "\n".join(parts)
 
     # =========================================================
+    # PER-CHUNK SERIALISATION FOR THE LIVE STREAM
+    #
+    # The tiered observer already computed, per response chunk:
+    # Tier 1 (chunked semantic), Tier 2 (NLI contradiction) and, when
+    # gated in, Tier 3 (LLM judge). This helper only SERIALISES those
+    # already-computed results into plain JSON for the live event
+    # stream -- it never recomputes semantic similarity or NLI, and
+    # reports exactly what ran (real / stub / not run) without
+    # fabricating anything.
+    # =========================================================
+
+    def _serialize_tiered_chunks(self, tiered) -> list[dict]:
+        """Serialise a TieredObservation's ChunkDecisions (no recompute)."""
+
+        if tiered is None:
+            return []
+
+        # Whether Tier 2 used a real NLI pipeline or an injected stub.
+        # A ContradictionChecker with an injected ``_model`` (tests /
+        # offline dry runs) is a STUB; with ``_model is None`` it loads
+        # the real roberta-large-mnli pipeline.
+        checker = getattr(self.security_observer, "contradiction_checker", None)
+        if checker is None:
+            nli_source = "not_run"
+        elif getattr(checker, "_model", None) is not None:
+            nli_source = "stub"
+        else:
+            nli_source = "real"
+
+        judge = getattr(self.security_observer, "llm_judge", None)
+        judge_stub = bool(getattr(judge, "stub", False)) if judge else False
+
+        chunks: list[dict] = []
+        for decision in getattr(tiered, "chunk_decisions", []) or []:
+
+            semantic = decision.semantic
+            semantic_payload = {
+                "assessed": bool(
+                    semantic is not None and semantic.assessed
+                ),
+                "task_similarity": (
+                    semantic.task_similarity if semantic is not None else None
+                ),
+                "subtask_similarity": (
+                    semantic.subtask_similarity if semantic is not None else None
+                ),
+                "objective_deviation": (
+                    semantic.objective_deviation
+                    if semantic is not None else None
+                ),
+                "scope_deviation": (
+                    semantic.scope_deviation if semantic is not None else None
+                ),
+                "deviation_score": (
+                    semantic.deviation_score if semantic is not None else None
+                ),
+                "confidence": (
+                    semantic.confidence if semantic is not None else None
+                ),
+            }
+
+            contradiction = decision.contradiction
+            nli_payload = (
+                {
+                    "ran": True,
+                    "source": nli_source,
+                    "label": contradiction.label,
+                    "confidence": contradiction.confidence,
+                    "premise": contradiction.premise,
+                    "hypothesis": contradiction.hypothesis,
+                }
+                if contradiction is not None
+                else {"ran": False, "source": "not_run"}
+            )
+
+            verdict = decision.tier3_verdict
+            judge_payload = (
+                {
+                    "ran": True,
+                    "contradicts_evidence": verdict.contradicts_evidence,
+                    "reasoning": verdict.reasoning,
+                    "stubbed": bool(verdict.stubbed),
+                    "cached": bool(verdict.cached),
+                }
+                if verdict is not None
+                else {
+                    "ran": False,
+                    "source": "not_run",
+                    "enabled": judge is not None,
+                    "stubbed": judge_stub,
+                }
+            )
+
+            chunks.append(
+                {
+                    "chunk_index": decision.chunk_index,
+                    "chunk_text": decision.chunk_text,
+                    "tiers_ran": list(decision.tiers_ran or []),
+                    "tier1_semantic": semantic_payload,
+                    "tier2_nli": nli_payload,
+                    "tier3_judge": judge_payload,
+                }
+            )
+
+        return chunks
+
+    # =========================================================
     # PUBLISH AGENT RESULT
     # =========================================================
 
@@ -3422,16 +3548,29 @@ class MASEnvironment:
             if artifact.get("receiver") == agent_id
         ]
 
-        observation = self.security_observer.observe(
+        # Tiered detection is the ONLY live path: chunked semantic
+        # (Tier 1) + NLI contradiction vs. this agent's linked evidence
+        # (Tier 2) + the gated LLM judge (Tier 3, off unless
+        # MAS_TIER3_JUDGE=1). Evidence is the artifacts actually
+        # delivered TO this agent -- the same per-response, one-hop-back
+        # evidence source used offline by experiments/eval_detector.py
+        # and experiments/security_dashboard.py. We keep the underlying
+        # base Observation (with metadata["tiered"] carrying the chunk-
+        # level result) so every downstream reader is unaffected.
+        observation = self.security_observer.observe_tiered(
             agent_id=agent_id,
             response=response,
             original_task=original_task,
             assigned_subtask=assigned_subtask,
             events=[],
             artifacts=artifacts_for_agent,
+            evidence_chunks=[
+                artifact.get("text") or ""
+                for artifact in artifacts_for_agent
+            ],
             tool_limit=self.tool_manager.tool_limit,
             metadata=metadata,
-        )
+        ).base
 
         self.security_observations.append(
             observation
@@ -3446,6 +3585,48 @@ class MASEnvironment:
         if self.event_publisher is not None:
             try:
                 assessment = observation.semantic_assessment
+                # The live pipeline stores the tiered result (chunk-level
+                # Tier 1/2/3 detail) on the observation's metadata. Surface
+                # its real per-chunk summary so the live dashboard carries
+                # actual values instead of whole-response-only fields.
+                tiered = (observation.metadata or {}).get("tiered")
+                # Run-level Tier-2/Tier-3 status so the UI can label a
+                # run as REAL NLI / STUB NLI / NLI NOT RUN and show
+                # whether the Tier-3 judge is enabled at all.
+                _checker = getattr(
+                    self.security_observer, "contradiction_checker", None
+                )
+                _judge = getattr(self.security_observer, "llm_judge", None)
+                tier2_source = (
+                    "not_run"
+                    if _checker is None
+                    else ("stub" if getattr(_checker, "_model", None)
+                          is not None else "real")
+                )
+                tier3_status = (
+                    "not_run"
+                    if _judge is None
+                    else ("stub" if getattr(_judge, "stub", False) else "real")
+                )
+                tiered_payload = (
+                    {
+                        "worst_chunk_deviation": tiered.worst_chunk_deviation,
+                        "contradiction_flagged_chunks":
+                            tiered.contradiction_flagged_chunks,
+                        "tier3_invocations": tiered.tier3_invocations,
+                        "chunk_count": (
+                            tiered.chunked.chunk_count
+                            if tiered.chunked is not None else 0
+                        ),
+                        # Run-level provenance (no recomputation).
+                        "tier2_source": tier2_source,
+                        "tier3_status": tier3_status,
+                        # The already-computed per-chunk results (Tier
+                        # 1/2/3). Serialised only -- never recomputed.
+                        "chunks": self._serialize_tiered_chunks(tiered),
+                    }
+                    if tiered is not None else None
+                )
                 self.event_publisher.emit(
                     "security_observation",
                     {
@@ -3488,6 +3669,7 @@ class MASEnvironment:
                             if isinstance(observation.response, str)
                             else str(observation.response)[:240]
                         ),
+                        "tiered": tiered_payload,
                     },
                 )
             except Exception:

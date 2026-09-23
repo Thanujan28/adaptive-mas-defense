@@ -108,19 +108,28 @@ class SubtaskIsTemplateTests(unittest.TestCase):
             metadata={"stage": "research"},
         )
 
-        self.assertEqual(len(assessor.seen_subtasks), 1)
-        subtask = assessor.seen_subtasks[0]
+        # The live pipeline now runs the TIERED detector: the semantic
+        # assessor is called once PER CHUNK (Tier 1) plus once for the
+        # whole-response base fusion. Every one of those calls must
+        # receive the SAME trusted subtask reference.
+        self.assertTrue(assessor.seen_subtasks)
+        subtasks = assessor.seen_subtasks
 
-        # The template is present.
-        self.assertIn(
-            RESEARCHER_ASSIGNMENT_TEMPLATE.strip()[:30],
-            subtask,
-        )
-        # The original task is present.
-        self.assertIn("Summarize the security risks.", subtask)
-        # The stage label is NOT the subtask.
-        self.assertNotEqual(subtask.strip(), "research")
-        self.assertNotIn(subtask.strip(), STAGE_LABELS)
+        for subtask in subtasks:
+            # The template is present.
+            self.assertIn(
+                RESEARCHER_ASSIGNMENT_TEMPLATE.strip()[:30],
+                subtask,
+            )
+            # The original task is present.
+            self.assertIn("Summarize the security risks.", subtask)
+            # The stage label is NOT the subtask.
+            self.assertNotEqual(subtask.strip(), "research")
+            self.assertNotIn(subtask.strip(), STAGE_LABELS)
+
+        # All calls share the identical reference (chunk + base fusion
+        # use the same trusted assignment).
+        self.assertEqual(len(set(subtasks)), 1)
 
     def test_subtask_never_equals_a_stage_label(self):
         assessor = _RecordingAssessor()

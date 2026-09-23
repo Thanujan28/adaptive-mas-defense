@@ -487,7 +487,7 @@ class RenderSmokeTests(unittest.TestCase):
         self.assertIn("title", names)
         self.assertIn("columns", names)
 
-    def test_render_creates_the_four_tabs(self):
+    def test_render_creates_the_expected_sections(self):
         fake = _FakeStreamlit()
         original = dash.st
         dash.st = fake
@@ -495,13 +495,19 @@ class RenderSmokeTests(unittest.TestCase):
             dash.render()
         finally:
             dash.st = original
-
-        tab_calls = [c for c in fake.calls if c[0] == "tabs"]
-        self.assertEqual(len(tab_calls), 1)
-        labels = tab_calls[0][1][0]
-        self.assertEqual(len(labels), 4)
-        self.assertTrue(any("Timeline" in str(l) for l in labels))
-        self.assertTrue(any("Security" in str(l) for l in labels))
+        # The page is organised into the required numbered sections. These
+        # are rendered as subheaders; assert the required ones are present.
+        headers = [
+            str(c[1][0])
+            for c in fake.calls
+            if c[0] == "subheader" and c[1]
+        ]
+        joined = " | ".join(headers).lower()
+        self.assertIn("run status", joined)
+        self.assertIn("agent summary", joined)
+        self.assertIn("live chunk stream", joined)
+        self.assertIn("resource usage", joined)
+        self.assertIn("raw event stream", joined)
 
     def test_render_with_no_run_does_not_raise(self):
         # Point the module at a temp dir with no files, then render.
