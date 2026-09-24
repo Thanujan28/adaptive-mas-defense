@@ -3,13 +3,28 @@ Ablation harness for defender signals.
 
 NOT run in CI.
 
-Compares defender configurations across the four experimental
-conditions in configs/config.yaml:
+Compares defender configurations across the IMPLEMENTED experimental
+conditions (attacks/scenarios.py::IMPLEMENTED_CONDITIONS). Unimplemented
+conditions (memory_poisoning, resource_exhaustion) are reported as
+"NOT IMPLEMENTED - not evaluated" and are never assigned a number.
 
-    clean
-    memory_poisoning
-    prompt_infection
-    resource_exhaustion
+TWO DATA SOURCES (choose one):
+
+  * ``--from-live-episodes`` (DEFAULT for a meaningful ablation)
+        Run real episodes through ``MASEnvironment`` + ``execute_task``
+        for each IMPLEMENTED condition (real LLM backend by default, or
+        ``--stub-llm`` for an offline dry run), then extract
+        (task, subtask, output, events, ground_truth_events,
+        resource_state) directly from the episodes. This is a claim
+        about the REAL MAS's actual clean/attacked output.
+
+  * ``--from-jsonl-template PATH`` (SYNTHETIC / OFFLINE ONLY)
+        Read hand-authored samples from a JSONL file (see
+        ``--write-template``). These are NOT from a real MAS episode.
+        Any number produced this way is a claim about the detector's
+        behaviour on HAND-WRITTEN text, not about the real system. The
+        run prints a loud SYNTHETIC banner and the CSV is prefixed with
+        a header comment saying so.
 
 Variants:
 
@@ -52,14 +67,21 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-CONDITIONS = (
-    "clean",
-    "memory_poisoning",
-    "prompt_infection",
-    "resource_exhaustion",
+# Single source of truth for which conditions actually exist. Never a
+# hand-maintained list: memory_poisoning/resource_exhaustion are
+# unimplemented stubs and MUST be reported as NOT IMPLEMENTED, not run.
+from attacks.scenarios import (
+    IMPLEMENTED_CONDITIONS,
+    UNIMPLEMENTED_CONDITIONS,
+    apply_attack,
 )
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Kept as an alias so downstream helpers keep a readable name, but it is
+# derived from the single source of truth, never hardcoded.
+CONDITIONS = IMPLEMENTED_CONDITIONS
+
+from security.model_names import SEMANTIC_MODEL_NAME as MODEL_NAME
+
 OUTPUT_DIR = Path("outputs")
 CSV_NAME = "ablation_signals.csv"
 TEMPLATE_NAME = "ablation_samples.jsonl"
@@ -88,6 +110,14 @@ class Sample:
 
 
 def load_samples_from_jsonl(path: Path) -> list[Sample]:
+    """
+    Load SYNTHETIC, hand-authored samples from a JSONL file.
+
+    These are NOT from a real MAS episode; see the module docstring.
+    Any number derived from them is a claim about the detector on
+    hand-written text, not about the real system.
+    """
+
     samples: list[Sample] = []
 
     with path.open("r", encoding="utf-8") as handle:
@@ -101,7 +131,9 @@ def load_samples_from_jsonl(path: Path) -> list[Sample]:
             if condition not in CONDITIONS:
                 raise ValueError(
                     f"Line {line_number}: unknown condition "
-                    f"{condition!r}"
+                    f"{condition!r}. Implemented conditions are "
+                    f"{CONDITIONS}; unimplemented "
+                    f"({UNIMPLEMENTED_CONDITIONS}) are never evaluated."
                 )
 
             samples.append(
@@ -160,6 +192,137 @@ def write_template(path: Path) -> None:
             handle.write(json.dumps(row) + "\n")
 
     print(f"Wrote template samples to {path}")
+
+
+# =============================================================
+# LIVE EPISODES (REAL DATA)
+# =============================================================
+
+_SYNTHETIC_BANNER = (
+    "\n"
+    + "!" * 78
+    + "\n!! SYNTHETIC SAMPLES -- not from a real MAS episode.\n"
+    + "!! These are hand-written/templated records read from a JSONL.\n"
+    + "!! Any AUROC/TPR below describes the detector on HAND-WRITTEN\n"
+    + "!! text, NOT the real system's clean/attacked output.\n"
+    + "!! Use --from-live-episodes for a real-data ablation.\n"
+    + "!" * 78
+    + "\n"
+)
+
+
+@dataclass
+class LiveEpisodeConfig:
+    episodes: int = 2
+    topologies: tuple = ("centralized",)
+    task: str = "Write a proposal on AI in cyber security"
+
+
+def _run_live_episodes(
+    config: LiveEpisodeConfig,
+    stub_llm: bool,
+    assessor,
+) -> list[Sample]:
+    """
+    Run REAL episodes (MASEnvironment + execute_task) for each
+    IMPLEMENTED condition and extract one Sample per observed agent
+    response.
+
+    Ground truth is taken ONLY from the attack simulator's own exposure
+    bookkeeping (evaluation.labels.exposure_labels) plus the observable
+    events the environment recorded -- never from the detector's own
+    patterns. This is the same provenance ``eval_detector.py`` uses.
+    """
+
+    import contextlib
+    import io as _io
+
+    from environment.mas_environment import MASEnvironment
+    from security.observer import SecurityObserver
+    from evaluation.labels import exposure_labels
+
+    # Reuse the exact stub installers eval_detector.py already uses so
+    # the two scripts stub identically. Agents call get_llm() during
+    # MASEnvironment.__init__, so the stub MUST be installed first.
+    from experiments.eval_detector import _install_stub_llm, _stub_tools
+
+    samples: list[Sample] = []
+
+    for condition in IMPLEMENTED_CONDITIONS:
+        for topology in config.topologies:
+            for episode in range(config.episodes):
+
+                if stub_llm:
+                    _install_stub_llm()
+
+                observer = SecurityObserver(
+                    semantic_assessor=assessor,
+                    log_enabled=False,
+                )
+                env = MASEnvironment(
+                    topology_name=topology,
+                    security_observer=observer,
+                )
+                if stub_llm:
+                    _stub_tools(env)
+
+                if condition != "clean":
+                    apply_attack(
+                        env, condition,
+                        task_id=f"{topology}-{episode}",
+                    )
+
+                buf = _io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    env.execute_task(config.task)
+
+                exposure = exposure_labels(env.attack_simulator)
+
+                # Ground-truth events: derive from the simulator's own
+                # bookkeeping, NEVER from the detector's patterns.
+                gt_events = []
+                if exposure.episode_exposed:
+                    for agent in sorted(exposure.agents_exposed):
+                        gt_events.append(
+                            {
+                                "event_type": "external_result_injection",
+                                "sender": "attack_simulator",
+                                "receiver": agent,
+                            }
+                        )
+
+                observable_events = env.get_observable_events()
+                resource_state = env.get_resource_state()
+                assigned_task = (
+                    getattr(env.episode_state, "task", config.task)
+                    or config.task
+                )
+
+                for observation in env.security_observations:
+                    response_text = observation.response
+                    if not isinstance(response_text, str):
+                        response_text = str(response_text or "")
+
+                    samples.append(
+                        Sample(
+                            condition=condition,
+                            task=assigned_task,
+                            subtask=observation.assigned_subtask,
+                            output=response_text,
+                            events=list(observable_events),
+                            ground_truth_events=list(gt_events),
+                            resource_state=dict(resource_state),
+                        )
+                    )
+
+    if not samples:
+        raise RuntimeError(
+            "Live-episode extraction produced no samples. Check that the "
+            "episodes ran and emitted observations; pass --stub-llm for "
+            "an offline dry run."
+        )
+
+    return samples
 
 
 # =============================================================
@@ -339,10 +502,40 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Ablate defender signals across conditions.",
     )
-    parser.add_argument("--from-jsonl", type=Path, default=None)
-    parser.add_argument("--write-template", action="store_true")
+    # ---- data source (mutually exclusive; live is the meaningful one) ----
+    parser.add_argument(
+        "--from-live-episodes", action="store_true",
+        help=("REAL DATA: run N real MAS episodes per IMPLEMENTED "
+              "condition and ablate on their actual output."),
+    )
+    parser.add_argument(
+        "--from-jsonl-template", type=Path, default=None,
+        help=("SYNTHETIC SAMPLES -- not from a real MAS episode. Read "
+              "hand-authored samples from a JSONL. Use "
+              "--from-live-episodes for a real-data ablation."),
+    )
+    # Backwards-compatible alias for the old flag name, loudly labelled.
+    parser.add_argument("--from-jsonl", type=Path, default=None,
+                        help="Deprecated alias for --from-jsonl-template "
+                             "(SYNTHETIC samples, not real episodes).")
+    parser.add_argument("--write-template", action="store_true",
+                        help="Write a SYNTHETIC sample template and exit.")
+    # ---- live-episode knobs ----
+    parser.add_argument("--episodes", type=int, default=2,
+                        help="Episodes per IMPLEMENTED condition "
+                             "(--from-live-episodes).")
+    parser.add_argument("--topology", default="centralized",
+                        help="Topology for live episodes.")
+    parser.add_argument("--task", default=LiveEpisodeConfig.task,
+                        help="Task for live episodes.")
+    parser.add_argument(
+        "--stub-llm", action="store_true",
+        help="Run live episodes with a deterministic stub LLM and stub "
+             "tools (offline dry run). Without this, the real LLM "
+             "backend is used.",
+    )
     parser.add_argument("--stub", action="store_true",
-                        help="Use a stub encoder (dry run).")
+                        help="Use a stub semantic encoder (dry run).")
     parser.add_argument("--csv", type=Path,
                         default=OUTPUT_DIR / CSV_NAME)
     return parser.parse_args(argv)
@@ -355,14 +548,47 @@ def main(argv: Optional[list[str]] = None) -> int:
         write_template(OUTPUT_DIR / TEMPLATE_NAME)
         return 0
 
-    if args.from_jsonl is None:
+    jsonl_path = args.from_jsonl_template or args.from_jsonl
+
+    if args.from_live_episodes and jsonl_path is not None:
         raise SystemExit(
-            "This ablation script requires --from-jsonl (per-condition "
-            "samples). Run --write-template to generate a template."
+            "Choose ONE data source: --from-live-episodes (real) or "
+            "--from-jsonl-template (synthetic)."
+        )
+    if not args.from_live_episodes and jsonl_path is None:
+        raise SystemExit(
+            "No data source given. Use --from-live-episodes for a REAL "
+            "ablation (runs MASEnvironment + execute_task), or "
+            "--from-jsonl-template for a SYNTHETIC/offline ablation "
+            "(not from a real episode)."
         )
 
-    samples = load_samples_from_jsonl(args.from_jsonl)
     assessor = _build_assessor(stub=args.stub)
+
+    # ---- Provenance banner + CSV-header provenance line ----
+    if args.from_live_episodes:
+        provenance = ("REAL: samples extracted from live MAS episodes "
+                      "(MASEnvironment + execute_task)")
+        print("\n=== ABLATION DATA SOURCE: REAL MAS EPISODES ===")
+        print(f"  conditions: {IMPLEMENTED_CONDITIONS}")
+        for condition in UNIMPLEMENTED_CONDITIONS:
+            print(f"  {condition}: NOT IMPLEMENTED - not evaluated")
+        print(f"  topology={args.topology} episodes/condition={args.episodes} "
+              f"stub_llm={args.stub_llm}")
+        samples = _run_live_episodes(
+            LiveEpisodeConfig(
+                episodes=args.episodes,
+                topologies=(args.topology,),
+                task=args.task,
+            ),
+            stub_llm=args.stub_llm,
+            assessor=assessor,
+        )
+    else:
+        provenance = ("SYNTHETIC: hand-authored samples from "
+                      f"{jsonl_path} -- NOT from a real MAS episode")
+        print(_SYNTHETIC_BANNER)
+        samples = load_samples_from_jsonl(jsonl_path)
 
     from security.state_builder import SecurityStateBuilder
 
@@ -437,8 +663,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         )
 
-    _write_csv(rows, args.csv)
-    _print_report(rows)
+    _write_csv(rows, args.csv, provenance)
+    _print_report(rows, provenance)
 
     return 0
 
@@ -463,13 +689,17 @@ def _evaluate(name, clean, attack, samples) -> dict:
     }
 
 
-def _write_csv(rows, path: Path) -> None:
+def _write_csv(rows, path: Path, provenance: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "variant", "auroc", "tpr_at_5fpr",
         "clean_mean", "attack_mean", "n_clean", "n_attack",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
+        # Provenance line as a leading CSV comment so a reader of the CSV
+        # alone can tell whether the numbers describe real episodes or
+        # hand-written synthetic text.
+        handle.write(f"# DATA SOURCE: {provenance}\n")
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
@@ -477,10 +707,11 @@ def _write_csv(rows, path: Path) -> None:
     print(f"Wrote ablation results to {path}")
 
 
-def _print_report(rows) -> None:
+def _print_report(rows, provenance: str = "") -> None:
     print("\n" + "=" * 78)
     print("DEFENDER SIGNAL ABLATION")
     print("=" * 78)
+    print(f"  DATA SOURCE: {provenance}")
     print(
         f"  {'variant':<30}{'AUROC':>10}"
         f"{'TPR@5%FPR':>12}{'clean':>10}{'attack':>10}"
