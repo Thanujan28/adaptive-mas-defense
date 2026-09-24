@@ -63,7 +63,12 @@ from security.resource_allocator import (
     ResourceAllocator,
 )
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Single source of truth for the semantic encoder name (shared with
+# calibrate_detector.py / ablate_signals.py / calibrate_semantic.py /
+# show_security_logs.py so the paper's "one encoder everywhere" claim
+# cannot silently drift).
+from security.model_names import SEMANTIC_MODEL_NAME as MODEL_NAME
+
 OUTPUT_DIR = Path("outputs")
 
 # Current observation weights (security/observer.py). NOT changed here;
