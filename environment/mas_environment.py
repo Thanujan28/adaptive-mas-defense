@@ -31,6 +31,12 @@ from security.observer import SecurityObserver
 from security.contradiction_checker import ContradictionChecker
 from security.llm_judge import LLMJudge
 from security.semantic_assessor import SemanticAssessment
+from security.detective_agent import DetectiveAgent, DETECTIVE_TOKEN_BUDGET
+from security.root_cause_tracer import (
+    ArtifactView,
+    RootCauseTracer,
+)
+from security.remediation import RemediationExecutor
 from environment.visibility import sanitize_observable_event
 from attacks.prompt_infection import check_infection_indicators
 
@@ -291,6 +297,43 @@ class MASEnvironment:
             tier3_judge = LLMJudge()
         else:
             tier3_judge = None
+
+        # =====================================================
+        # REMEDIATION / CONTAINMENT (Task S) -- SEPARATE FLAG
+        #
+        # The containment layer (detective agent -> root-cause tracer
+        # -> remediation executor -> re-run) MUTATES pipeline execution:
+        # it discards a confirmed root-cause artifact and re-runs the
+        # affected agent node(s). It is gated behind MAS_REMEDIATION_ENABLED
+        # (default 0/off), INDEPENDENT of MAS_TIER3_JUDGE, so it can be
+        # tested in isolation and turned on separately once validated.
+        #
+        # It defaults OFF because this is the first change that mutates
+        # execution rather than only observing it: the re-run cost and
+        # behaviour are UNVALIDATED (the layer can only fire at all when
+        # Tier 3 CONFIRMS a contradiction, so real correctness is gated
+        # on Tier 3 being validated first via judge_pilot_set.jsonl).
+        # Set MAS_REMEDIATION_ENABLED=1 to turn it on.
+        # =====================================================
+        self.remediation_enabled = (
+            os.getenv("MAS_REMEDIATION_ENABLED", "0") == "1"
+        )
+
+        # Per-episode containment state:
+        #   * roots already remediated (so two chunks / two agents that
+        #     implicate the SAME artifact do NOT re-run twice);
+        #   * the external per-artifact attempt counter (never global);
+        #   * the running remediation summary reported at episode end.
+        self._remediated_roots = set()
+        self._remediation_attempts = {}
+        self.remediation_summary = []
+
+        # Live snapshot of the graph state pieces the containment layer
+        # needs to reconstruct an MASState when it re-runs a node. These
+        # are captured additively by the coordinator/outline nodes (they
+        # are NOT altered in behaviour, only remembered).
+        self._current_plan = None
+        self._current_outline = None
 
         self.security_observer = (
             security_observer
@@ -2109,6 +2152,11 @@ class MASEnvironment:
             },
         )
 
+        # Remember the (trusted) plan so the containment layer can
+        # reconstruct an MASState if it ever needs to re-run a node.
+        # Purely additive: this does not change the node's behaviour.
+        self._current_plan = plan
+
         return {
             "plan":
                 plan,
@@ -2287,6 +2335,10 @@ class MASEnvironment:
                     ),
             },
         )
+
+        # Remember the outline so the containment layer can reconstruct
+        # an MASState for a re-run. Purely additive.
+        self._current_outline = outline_result
 
         return {
             "outline":
@@ -3578,6 +3630,25 @@ class MASEnvironment:
         )
 
         # -----------------------------------------------------
+        # CONTAINMENT / REMEDIATION (Task S) -- GATED, OFF BY DEFAULT
+        #
+        # After the tiered observer has run, if the containment layer is
+        # enabled AND Tier 3 actually CONFIRMED a contradiction on some
+        # chunk, run the detective -> tracer -> remediation flow and
+        # perform the scoped re-run. This is the ONLY point where the
+        # pipeline can be MUTATED. When MAS_REMEDIATION_ENABLED is off,
+        # _maybe_remediate is a no-op (returns None) and behaviour is
+        # byte-for-byte identical to before.
+        # -----------------------------------------------------
+        self._maybe_remediate(
+            tiered=observation.metadata.get("tiered"),
+            agent_id=agent_id,
+            response=response,
+            artifacts_for_agent=artifacts_for_agent,
+            original_task=original_task,
+        )
+
+        # -----------------------------------------------------
         # LIVE EVENT STREAM: security observation for this agent
         #
         # Purely observational. Only fields the observer already
@@ -3682,6 +3753,506 @@ class MASEnvironment:
                 pass
 
         return observation
+
+    # =========================================================
+    # CONTAINMENT / REMEDIATION (Task S)
+    #
+    # The ONLY code path that MUTATES pipeline execution. Gated behind
+    # MAS_REMEDIATION_ENABLED (default off). It consumes the tiered
+    # observer's OUTPUT (a judge-confirmed contradiction) -- it never
+    # modifies observe_tiered, the contradiction checker or the judge.
+    # =========================================================
+
+    # Canonical pipeline dependency order (upstream -> downstream), used
+    # to (a) order the agents a remediation re-runs and (b) build the
+    # forward cascade. The coordinator's final verification is the last
+    # downstream stage.
+    _PIPELINE_ORDER = (
+        "coordinator",
+        "outline",
+        "researcher",
+        "analyst",
+        "executor",
+        "coordinator_final",
+    )
+
+    # Map a re-runnable logical stage onto the graph node method and the
+    # mailbox that feeds it. Only stages that actually consume upstream
+    # content and can be re-invoked in isolation are listed.
+    def _rerun_node_for(self, stage: str):
+        return {
+            "outline": (self.outline_node, "outline", "coordinator"),
+            "researcher": (self.research_node, "researcher", "outline"),
+            "executor": (self.execution_node, "executor", "researcher"),
+        }.get(stage)
+
+    def _judge_confirmed_chunks(self, tiered):
+        """Return the chunks Tier 3 CONFIRMED contradict their evidence.
+
+        This is the ONLY activation condition for the containment layer:
+        Tier 1/2 alone never trigger it. When Tier 3 did not run (judge
+        disabled / gate not exceeded) this returns an empty list, so the
+        layer is inert whenever MAS_TIER3_JUDGE is off.
+        """
+        confirmed = []
+        for decision in getattr(tiered, "chunk_decisions", None) or []:
+            verdict = getattr(decision, "tier3_verdict", None)
+            if verdict is not None and bool(
+                getattr(verdict, "contradicts_evidence", False)
+            ):
+                confirmed.append(decision)
+        return confirmed
+
+    def _maybe_remediate(
+        self,
+        *,
+        tiered,
+        agent_id,
+        response,
+        artifacts_for_agent,
+        original_task,
+    ):
+        """Run the containment flow for judge-confirmed chunks.
+
+        No-op (returns None) when MAS_REMEDIATION_ENABLED is off or when
+        no chunk was judge-confirmed. Never raises into the pipeline: any
+        containment failure is logged and swallowed so it can never
+        change the experiment's own behaviour.
+        """
+        if not self.remediation_enabled or tiered is None:
+            return None
+
+        confirmed = self._judge_confirmed_chunks(tiered)
+        if not confirmed:
+            return None
+
+        try:
+            return self._run_containment(
+                confirmed=confirmed,
+                agent_id=agent_id,
+                response=response,
+                artifacts_for_agent=artifacts_for_agent,
+                original_task=original_task,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self.log_event(
+                MASEvent.create(
+                    event_type="investigation",
+                    sender="security_monitor",
+                    receiver=agent_id,
+                    content="Containment layer error (swallowed)",
+                    metadata={
+                        "stage": "containment_error",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "topology": self.topology_name,
+                    },
+                )
+            )
+            return None
+
+    def _run_containment(
+        self,
+        *,
+        confirmed,
+        agent_id,
+        response,
+        artifacts_for_agent,
+        original_task,
+    ):
+        """Detective -> tracer -> remediation -> scoped re-run."""
+
+        # ---- Shared encoder for the detective (no second model). ----
+        assessor = getattr(self.security_observer, "semantic_assessor", None)
+        if assessor is None:
+            return None
+
+        # The detective gets the proposed budget (a PROPOSAL, not a
+        # spend); the tracer/executor are constructed from live state.
+        detective = DetectiveAgent(
+            assessor=assessor,
+            llm=getattr(self, "remediation_detective_llm", None),
+            token_budget=DETECTIVE_TOKEN_BUDGET,
+            token_counter=self.token_counter,
+        )
+        checker = getattr(self.security_observer, "contradiction_checker", None)
+        tracer = RootCauseTracer(checker, self._trace_evidence_lookup)
+        executor = RemediationExecutor(
+            consumer_index=self._build_consumer_index(),
+            consumer_graph=self._build_consumer_graph(),
+            pipeline_order=list(self._PIPELINE_ORDER),
+        )
+
+        upstream_responses = self._upstream_responses_for(agent_id)
+        summary = {"chunks": [], "reruns": [], "cost": {}}
+
+        for decision in confirmed:
+            finding = detective.investigate(
+                chunk_text=decision.chunk_text,
+                evidence_chunks=[
+                    artifact.get("text") or ""
+                    for artifact in artifacts_for_agent
+                ],
+                evidence_artifacts=artifacts_for_agent,
+                upstream_responses=upstream_responses,
+                task=original_task,
+            )
+            self._log_containment(
+                agent_id,
+                "detective_finding",
+                {
+                    "chunk_index": decision.chunk_index,
+                    "attributable": finding.attributable,
+                    "source_artifact_id": finding.source_artifact_id,
+                    "requests_tracer": finding.requests_tracer,
+                    "tokens_used": finding.tokens_used,
+                    "budget_exhausted": finding.budget_exhausted,
+                    "reasoning": finding.reasoning,
+                },
+            )
+
+            if not finding.attributable:
+                self._log_containment(
+                    agent_id,
+                    "not_attributable",
+                    {"chunk_index": decision.chunk_index,
+                     "reasoning": finding.reasoning},
+                )
+                summary["chunks"].append(
+                    {"chunk_index": decision.chunk_index,
+                     "outcome": "not_attributable"}
+                )
+                continue
+
+            root = finding.source_artifact_id
+
+            if finding.requests_tracer:
+                if checker is None:
+                    self._log_containment(
+                        agent_id, "tracer_unavailable", {}
+                    )
+                    summary["chunks"].append(
+                        {"chunk_index": decision.chunk_index,
+                         "outcome": "tracer_unavailable"}
+                    )
+                    continue
+                trace = tracer.trace(root)
+                self._log_containment(
+                    agent_id,
+                    "trace_result",
+                    {
+                        "start": root,
+                        "root_found": trace.root_found,
+                        "root_artifact_id": trace.root_artifact_id,
+                        "hops_taken": trace.hops_taken,
+                        "stopped_reason": trace.stopped_reason,
+                    },
+                )
+                if not trace.root_found:
+                    summary["chunks"].append(
+                        {"chunk_index": decision.chunk_index,
+                         "outcome": "no_root",
+                         "stopped_reason": trace.stopped_reason}
+                    )
+                    continue
+                root = trace.root_artifact_id
+
+            # ---- Duplicate-root guard: never remediate the same
+            #      artifact twice in one episode. ----
+            if root in self._remediated_roots:
+                self._log_containment(
+                    agent_id, "skip_duplicate_root", {"root": root}
+                )
+                summary["chunks"].append(
+                    {"chunk_index": decision.chunk_index,
+                     "outcome": "duplicate_root"}
+                )
+                continue
+
+            plan, self._remediation_attempts = executor.plan(
+                root_artifact_id=root,
+                attempts=self._remediation_attempts,
+            )
+            if plan.over_attempt_cap:
+                self._log_containment(
+                    agent_id,
+                    "remediation_unresolved",
+                    {"root": root, "attempt": plan.attempt,
+                     "reason": "attempt cap reached"},
+                )
+                summary["chunks"].append(
+                    {"chunk_index": decision.chunk_index,
+                     "outcome": "unresolved_attempt_cap",
+                     "root": root}
+                )
+                continue
+
+            if not plan.agents_to_rerun:
+                summary["chunks"].append(
+                    {"chunk_index": decision.chunk_index,
+                     "outcome": "no_consumers"}
+                )
+                continue
+
+            # ---- Perform the scoped re-run and measure its cost. ----
+            cost_before = self._cost_snapshot()
+            reran = self._rerun_agents(plan.agents_to_rerun, root)
+            cost_after = self._cost_snapshot()
+            delta = {
+                key: cost_after[key] - cost_before[key]
+                for key in cost_after
+            }
+
+            self._remediated_roots.add(root)
+            summary["chunks"].append(
+                {"chunk_index": decision.chunk_index,
+                 "outcome": "remediated",
+                 "root": root,
+                 "attempt": plan.attempt}
+            )
+            summary["reruns"].append(
+                {"root": root, "agents": reran, "cost": delta}
+            )
+
+            self._log_containment(
+                agent_id,
+                "remediation_performed",
+                {
+                    "root": root,
+                    "agents_to_rerun": plan.agents_to_rerun,
+                    "agents_reran": reran,
+                    "attempt": plan.attempt,
+                    "cost": delta,
+                },
+            )
+
+        summary["cost"] = self._total_remediation_cost(summary)
+        self.remediation_summary.append(
+            {"agent_id": agent_id, "summary": summary}
+        )
+        return summary
+
+    # ---------------------------------------------------------
+    # CONTAINMENT HELPERS
+    # ---------------------------------------------------------
+
+    def _log_containment(self, agent_id, stage, payload):
+        """Record one containment milestone as an observable event.
+
+        Uses the existing 'investigation' security event type (already
+        whitelisted in record_security_event). This is how a
+        non-activating outcome ('not_attributable', 'hop limit exceeded'
+        -> 'no_root') leaves a CLEAR LOG ENTRY without any re-run.
+        """
+        self.log_event(
+            MASEvent.create(
+                event_type="investigation",
+                sender="security_monitor",
+                receiver=agent_id,
+                content=f"containment:{stage}",
+                metadata={
+                    "stage": "containment",
+                    "containment_stage": stage,
+                    "topology": self.topology_name,
+                    **{str(k): v for k, v in (payload or {}).items()},
+                },
+            )
+        )
+
+    def _upstream_responses_for(self, agent_id):
+        """Earlier-stage agent outputs (for detective attribution).
+
+        Reconstructed from the observable message artifacts already
+        published in this episode; only messages whose receiver is this
+        agent (i.e. its actual upstream feed) or from stages earlier in
+        the pipeline are included.
+        """
+        responses = {}
+        for artifact in self.get_observable_artifacts():
+            if artifact.get("artifact_type") != "message":
+                continue
+            receiver = artifact.get("receiver")
+            sender = artifact.get("source")
+            if receiver != agent_id and sender is None:
+                continue
+            text = artifact.get("text") or ""
+            if text:
+                responses.setdefault(f"agent:{sender}", text)
+        return responses
+
+    def _build_consumer_index(self):
+        """artifact_id -> agents that consumed it (from artifacts).
+
+        A tool result is keyed by 'req:<request_id>'; a message by
+        'msg:<message_id>' (falling back to the sender tag). The
+        detective/tracer emit 'req:<id>' / 'agent:<name>' ids, so both
+        forms are indexed here.
+        """
+        index = {}
+        for artifact in self.get_observable_artifacts():
+            receiver = artifact.get("receiver")
+            if not receiver:
+                continue
+            request_id = artifact.get("request_id")
+            message_id = artifact.get("message_id")
+            source = artifact.get("source")
+            keys = []
+            if request_id:
+                keys.append(f"req:{request_id}")
+            if message_id:
+                keys.append(f"msg:{message_id}")
+            if source:
+                keys.append(f"agent:{source}")
+            for key in keys:
+                index.setdefault(key, [])
+                if receiver not in index[key]:
+                    index[key].append(receiver)
+        return index
+
+    def _build_consumer_graph(self):
+        """agent -> downstream agents it feeds (forward cascade).
+
+        Built from the topology's allowed edges, restricted to the
+        linear pipeline order, so a re-run cascades FORWARD from the
+        fix point in dependency order.
+        """
+        graph = {}
+        nodes = list(self._PIPELINE_ORDER)
+        # Map logical stages onto concrete agent names present here.
+        for stage in ("outline", "researcher", "executor"):
+            downstream = {
+                "outline": ["researcher"],
+                "researcher": ["executor"],
+                "executor": ["coordinator_final"],
+            }[stage]
+            graph.setdefault(stage, []).extend(downstream)
+        # Preserve canonical order; de-dup.
+        for key, values in graph.items():
+            seen = []
+            for value in values:
+                if value not in seen:
+                    seen.append(value)
+            graph[key] = seen
+        return graph
+
+    def _cost_snapshot(self):
+        """Tokens + LLM calls so far (for the remediation cost delta)."""
+        llm_calls = sum(
+            1 for event in self.events
+            if event.event_type in ("llm_usage", "llm_budget_exceeded")
+        )
+        return {
+            "tokens": int(self.resource_budget.tokens_used),
+            "llm_calls": int(llm_calls),
+        }
+
+    @staticmethod
+    def _total_remediation_cost(summary):
+        total = {"tokens": 0, "llm_calls": 0}
+        for rerun in summary.get("reruns", []):
+            cost = rerun.get("cost", {})
+            total["tokens"] += int(cost.get("tokens", 0))
+            total["llm_calls"] += int(cost.get("llm_calls", 0))
+        return total
+
+    def _reconstruct_state(self):
+        """Rebuild an MASState for a re-run from captured pieces."""
+        return {
+            "task": self.episode_state.task,
+            "plan": self._current_plan,
+            "outline": self._current_outline,
+            "final_result": None,
+            "report_file": None,
+            "error": None,
+        }
+
+    def _rerun_agents(self, agents_to_rerun, discard_root):
+        """Re-invoke ONLY the affected node(s), in dependency order.
+
+        Returns the list of stages actually re-run. This is the scoped
+        re-run described in docs/remediation_design.md section 4:
+
+          * drop the stale queued input for each consumer (the polluted
+            message), i.e. 'discard the artifact';
+          * call the existing node method directly with a reconstructed
+            MASState -- NO graph restructuring and NO full re-entry.
+
+        Only stages with a known re-runnable node method are invoked;
+        unknown stages (e.g. 'coordinator_final') are logged and skipped,
+        so the cascade never tries to re-run a stage that cannot be
+        isolated.
+        """
+        reran = []
+        state = self._reconstruct_state()
+        for stage in agents_to_rerun:
+            node = self._rerun_node_for(stage)
+            if node is None:
+                self._log_containment(
+                    stage, "rerun_skipped", {"reason": "not re-runnable"}
+                )
+                continue
+            method, mailbox_agent, _ = node
+            # Discard any STALE queued input for this agent so it cannot
+            # re-consume the polluted upstream message.
+            self._drain_mailbox(mailbox_agent)
+            self._log_containment(
+                mailbox_agent,
+                "rerun_start",
+                {"discarded_artifact_id": discard_root},
+            )
+            method(state)
+            reran.append(stage)
+        return reran
+
+    def _drain_mailbox(self, agent):
+        """Drop queued messages for one agent (discard stale input)."""
+        if self.topology_name == "shared_pool":
+            self.shared_pool[:] = [
+                message for message in self.shared_pool
+                if message.get("receiver") != agent
+            ]
+            return
+        if agent in self.agent_mailboxes:
+            self.agent_mailboxes[agent] = []
+
+    def _trace_evidence_lookup(self, artifact_id):
+        """One-hop view of an artifact for the root-cause tracer.
+
+        For a 'req:<id>' tool result: the artifact's own text plus its
+        receiver's downstream artifacts as upstream evidence. For an
+        'agent:<name>' output: the messages this agent received. The
+        trusted root ids (task / coordinator plan) are reported as
+        trusted and never traced into.
+        """
+        from security.root_cause_tracer import TRUSTED_ROOT_IDS
+        if artifact_id in TRUSTED_ROOT_IDS:
+            return ArtifactView(
+                artifact_id=artifact_id, is_trusted_root=True
+            )
+        if artifact_id.startswith("req:"):
+            request_id = artifact_id.split(":", 1)[1]
+            for artifact in self.get_observable_artifacts():
+                if artifact.get("request_id") == request_id:
+                    return ArtifactView(
+                        artifact_id=artifact_id,
+                        text=artifact.get("text") or "",
+                        upstream_ids=[],
+                        upstream_evidence=[],
+                    )
+        if artifact_id.startswith("agent:"):
+            name = artifact_id.split(":", 1)[1]
+            received = [
+                artifact.get("text") or ""
+                for artifact in self.get_observable_artifacts()
+                if artifact.get("receiver") == name
+            ]
+            return ArtifactView(
+                artifact_id=artifact_id,
+                text="",
+                upstream_ids=[],
+                upstream_evidence=received,
+            )
+        return None
 
     def publish_agent_result(
         self,
@@ -3854,6 +4425,19 @@ class MASEnvironment:
         # =====================================================
 
         self.agent_assignments = {}
+
+        # =====================================================
+        # RESET PER-EPISODE REMEDIATION STATE (Task S)
+        #
+        # Always reset, even when the layer is disabled, so a disabled
+        # run leaves no stale state behind.
+        # =====================================================
+
+        self._remediated_roots = set()
+        self._remediation_attempts = {}
+        self.remediation_summary = []
+        self._current_plan = None
+        self._current_outline = None
 
         # =====================================================
         # CLEAR EVENT LOG
