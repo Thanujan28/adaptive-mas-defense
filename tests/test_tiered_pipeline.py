@@ -387,14 +387,34 @@ class SharedChunkTests(unittest.TestCase):
             decision.contradiction.hypothesis,
         )
 
-    def test_nli_is_not_called_when_no_evidence(self):
-        """No evidence -> no Tier 2, and no chunking work for NLI at all."""
+    def test_no_evidence_runs_task_alignment_nli_but_not_evidence_nli(self):
+        """
+        ``evidence_chunks=[]`` disables ONLY the evidence-contradiction axis.
 
-        calls: list[str] = []
+        The two TASK-ALIGNMENT NLI families are NOT evidence checks, so they
+        must still run with no evidence at all:
+
+          * the ORIGINAL USER TASK is the premise (primary), and
+          * the ASSIGNED SUBTASK is the premise (secondary),
+
+        while the hypotheses are the claims of the SAME authoritative
+        response chunk Tier 1 used. No retrieved evidence may ever become
+        the premise of a task-alignment check (there is none here, and the
+        premise set is asserted to contain only the two references).
+        """
+
+        subtask = "Gather evidence about AI in cyber security."
+
+        pairs: list[tuple[str, str]] = []
 
         class _RecordingNLI:
             def __call__(self, inputs, truncation=True):
-                calls.append(str(inputs["text_pair"]))
+                pairs.append(
+                    (
+                        str(inputs.get("text", "")),
+                        str(inputs.get("text_pair", "")),
+                    )
+                )
                 return [{"label": "neutral", "score": 1.0}]
 
         observer = SecurityObserver(
@@ -407,15 +427,57 @@ class SharedChunkTests(unittest.TestCase):
             agent_id="researcher",
             response=ON_TOPIC,
             original_task=TASK,
-            assigned_subtask=TASK,
+            assigned_subtask=subtask,
             evidence_chunks=[],
             events=[],
         )
 
-        self.assertEqual(calls, [])
+        # The task-alignment NLI ran even though there was no evidence.
+        self.assertTrue(
+            pairs,
+            "task-alignment NLI must not be gated on evidence",
+        )
+
+        self.assertTrue(result.chunk_decisions)
         for decision in result.chunk_decisions:
+
+            # ---- original task (primary) ----
+            original = decision.original_task_nli
+            self.assertIsNotNone(original)
+            self.assertTrue(original.ran)
+            self.assertEqual(original.reference_kind, "original_task")
+            self.assertEqual(original.premise, TASK)
+            # Hypothesis comes from THIS chunk's own text.
+            self.assertIn(original.hypothesis, decision.chunk_text)
+
+            # ---- assigned subtask (secondary) ----
+            assigned = decision.assigned_subtask_nli
+            self.assertIsNotNone(assigned)
+            self.assertTrue(assigned.ran)
+            self.assertEqual(assigned.reference_kind, "assigned_subtask")
+            self.assertEqual(assigned.premise, subtask)
+            self.assertIn(assigned.hypothesis, decision.chunk_text)
+
+            # Both families used the SAME extracted claim list.
+            self.assertEqual(original.claims, assigned.claims)
+
+            # ---- the evidence axis is still skipped (no evidence) ----
             self.assertEqual(decision.tiers_ran, ["tier1"])
             self.assertIsNone(decision.contradiction)
+
+        # Every premise passed to the NLI model was a task-alignment
+        # reference -- never retrieved evidence.
+        self.assertEqual(
+            {premise for premise, _ in pairs},
+            {TASK, subtask},
+        )
+        # ...and every hypothesis came from the authoritative chunk.
+        chunk_texts = [d.chunk_text for d in result.chunk_decisions]
+        for _, hypothesis in pairs:
+            self.assertTrue(
+                any(hypothesis in chunk for chunk in chunk_texts),
+                "hypothesis is not part of an authoritative chunk",
+            )
 
     def test_chunk_decision_retains_index_text_semantic_and_nli(self):
         """Each decision keeps chunk_index, chunk_text, semantic + NLI."""

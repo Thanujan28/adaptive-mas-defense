@@ -30,10 +30,20 @@ The experiment publishes each agent response's already-computed
 per-chunk results inside the ``security_observation`` event, under
 ``payload.tiered.chunks`` (see
 ``MASEnvironment._serialize_tiered_chunks``). Each chunk entry carries
-its Tier 1 semantic scores, its Tier 2 NLI result (or an explicit
-"not run" marker) and its Tier 3 judge verdict (or "not run"). This
-module renders exactly those values -- it never recomputes semantic
-similarity or NLI.
+
+  * its Tier 1 semantic results for TWO separate reference axes
+    (``original_task_*`` -- primary -- and ``assigned_subtask_*`` --
+    secondary),
+  * its Tier 2 evidence-NLI result (or an explicit "not run" marker),
+  * its two Tier 2 TASK-ALIGNMENT NLI results, kept in separate fields:
+    ``tier2_original_task_nli`` (premise = original user prompt, primary)
+    and ``tier2_assigned_subtask_nli`` (premise = assigned subtask,
+    secondary; NOT RUN with a reason when no subtask exists),
+  * its Tier 3 judge verdict (or "not run").
+
+This module renders exactly those values -- it never recomputes semantic
+similarity or NLI, and it never presents one comparison as if it were
+the other.
 """
 
 from __future__ import annotations
@@ -125,6 +135,54 @@ def _fmt(value, digits: int = 4) -> str:
         return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _axis_value(sem: dict, axis: str, suffix: str) -> str:
+    """
+    One Tier-1 axis value for the reference-axes table.
+
+    Shows the published number when that axis actually ran, else an
+    explicit ``NOT_RUN``/``N/A`` marker -- never the other axis' score.
+    """
+
+    if not sem.get(f"{axis}_assessed"):
+        return "N/A (NOT_RUN)"
+    value = sem.get(f"{axis}_{suffix}")
+    if value is None:
+        return "N/A (NOT_RUN)"
+    return _fmt(value)
+
+
+def _render_reference_nli(
+    title: str,
+    block: dict,
+    *,
+    premise_label: str,
+) -> None:
+    """
+    Render ONE task-alignment NLI family (premise/hypothesis/label/conf).
+
+    Every value comes verbatim from the published event; a family that did
+    not run is shown as NOT RUN with the recorded reason instead of a
+    fabricated label.
+    """
+
+    st.markdown(f"**{title}**")
+
+    status = alignment_nli_status(block)
+    if status == "not_run":
+        reason = block.get("not_run_reason") or "reason not recorded"
+        st.info(f"{title}: NOT RUN — {reason}")
+        return
+
+    badge = "REAL NLI" if status == "real" else "STUB NLI"
+    st.markdown(f"`{badge}`")
+    st.markdown(f"**Label:** {block.get('label')}")
+    st.markdown(f"**Confidence:** {_fmt(block.get('confidence'))}")
+    st.markdown(f"**Premise ({premise_label}):**")
+    st.caption(str(block.get("premise") or "")[:800])
+    st.markdown("**Hypothesis (extracted response claim):**")
+    st.caption(str(block.get("hypothesis") or "")[:800])
 
 
 def build_timeline_rows(events: list[dict]) -> list[dict]:
@@ -448,16 +506,67 @@ def tier3_status_of_events(events: list[dict]) -> str:
     return "not_run"
 
 
+def _round6(value):
+    """
+    Round a published numeric field to 6 dp for DISPLAY.
+
+    The event stream carries full float precision; the dashboard shows a
+    stable, human-comparable value. ``None`` (the axis did NOT run) passes
+    through unchanged, so a missing axis can never be rendered as 0.0 and
+    mistaken for a real score.
+    """
+
+    if value is None:
+        return None
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return value
+
+
 def chunk_semantic_fields(chunk: dict) -> dict:
     """
     The Tier-1 semantic fields to display for a chunk, verbatim from the
-    published event (never recomputed). Returns a dict keyed by the field
-    names the UI shows.
+    published event (never recomputed).
+
+    TWO INDEPENDENT REFERENCE AXES are returned side by side:
+
+      * original-task  (primary,  trusted reference)
+      * assigned-subtask (secondary reference)
+
+    The legacy fused keys are returned too, unchanged, so older events and
+    older callers keep working.
     """
 
     sem = chunk.get("tier1_semantic") or {}
+
     return {
         "assessed": bool(sem.get("assessed")),
+        # ---- PRIMARY axis: original user task ----
+        "original_task_assessed": bool(sem.get("original_task_assessed")),
+        "original_task_similarity": _round6(
+            sem.get("original_task_similarity")
+        ),
+        "original_task_deviation": _round6(
+            sem.get("original_task_deviation")
+        ),
+        "original_task_not_run_reason": (
+            sem.get("original_task_not_run_reason") or ""
+        ),
+        # ---- SECONDARY axis: assigned subtask ----
+        "assigned_subtask_assessed": bool(
+            sem.get("assigned_subtask_assessed")
+        ),
+        "assigned_subtask_similarity": _round6(
+            sem.get("assigned_subtask_similarity")
+        ),
+        "assigned_subtask_deviation": _round6(
+            sem.get("assigned_subtask_deviation")
+        ),
+        "assigned_subtask_not_run_reason": (
+            sem.get("assigned_subtask_not_run_reason") or ""
+        ),
+        # ---- legacy aliases (kept for older events/readers) ----
         "task_similarity": sem.get("task_similarity"),
         "subtask_similarity": sem.get("subtask_similarity"),
         "objective_deviation": sem.get("objective_deviation"),
@@ -465,6 +574,72 @@ def chunk_semantic_fields(chunk: dict) -> dict:
         "deviation_score": sem.get("deviation_score"),
         "confidence": sem.get("confidence"),
     }
+
+
+# ---------------------------------------------------------------------
+# TASK-ALIGNMENT NLI (Tier 2): TWO separate reference families
+# ---------------------------------------------------------------------
+#
+# The published chunk carries two explicit, independent blocks:
+#
+#   tier2_original_task_nli      premise = original user prompt (PRIMARY)
+#   tier2_assigned_subtask_nli   premise = assigned subtask    (SECONDARY)
+#
+# Neither is read from the other, and neither falls back to the evidence
+# axis (``tier2_nli``), so the dashboard can never present one comparison
+# as if it were the other.
+
+_LEGACY_ALIGNMENT_REASON = (
+    "not published for this chunk (older event schema)"
+)
+
+
+def _alignment_block(chunk: dict, key: str) -> dict:
+    """
+    Return one published task-alignment NLI block, or an explicit NOT RUN
+    block when the event does not carry it. Never computes anything.
+    """
+
+    block = chunk.get(key)
+    if not isinstance(block, dict):
+        return {
+            "ran": False,
+            "source": "not_run",
+            "not_run_reason": _LEGACY_ALIGNMENT_REASON,
+            "claims": [],
+        }
+    return block
+
+
+def chunk_original_task_nli(chunk: dict) -> dict:
+    """
+    Tier-2 ORIGINAL-TASK alignment NLI for a chunk (PRIMARY signal).
+
+    Premise is the original user prompt; hypothesis is an extracted
+    response claim of the same chunk.
+    """
+
+    return _alignment_block(chunk, "tier2_original_task_nli")
+
+
+def chunk_assigned_subtask_nli(chunk: dict) -> dict:
+    """
+    Tier-2 ASSIGNED-SUBTASK alignment NLI for a chunk (SECONDARY signal).
+
+    Premise is the assigned subtask; hypothesis is the SAME extracted
+    response claim. Reads NOT RUN (with a reason) when no subtask existed.
+    """
+
+    return _alignment_block(chunk, "tier2_assigned_subtask_nli")
+
+
+def alignment_nli_status(block: dict) -> str:
+    """'real' | 'stub' | 'not_run' for one task-alignment NLI block."""
+
+    if not block.get("ran"):
+        return "not_run"
+    return str(block.get("source") or "not_run")
+
 
 
 def latest_event_time(events: list[dict]) -> str:
@@ -538,14 +713,49 @@ def render_chunk_card(chunk: dict, *, newest: bool = False) -> None:
 
         col1, col2, col3 = st.columns(3)
 
-        # -------- TIER 1 — SEMANTIC --------
+        # -------- TIER 1 — SEMANTIC ALIGNMENT --------
         with col1:
-            st.markdown("**Tier 1 — Semantic**")
+            st.markdown("**Tier 1 — Semantic Alignment**")
             sem = chunk_semantic_fields(chunk)
             if not sem["assessed"]:
                 st.caption("semantic assessment did not run for this chunk")
             else:
+                # Two INDEPENDENT reference axes, rendered as separate rows
+                # so neither can be read as the other.
                 st.markdown(
+                    "**Reference axes** — original task (primary), "
+                    "assigned subtask (secondary)"
+                )
+                st.markdown(
+                    "| Metric | Value |\n"
+                    "| --- | --- |\n"
+                    f"| Original-task similarity | "
+                    f"{_axis_value(sem, 'original_task', 'similarity')} |\n"
+                    f"| Original-task deviation | "
+                    f"{_axis_value(sem, 'original_task', 'deviation')} |\n"
+                    f"| Assigned-subtask similarity | "
+                    f"{_axis_value(sem, 'assigned_subtask', 'similarity')} |\n"
+                    f"| Assigned-subtask deviation | "
+                    f"{_axis_value(sem, 'assigned_subtask', 'deviation')} |"
+                )
+                if not sem["original_task_assessed"]:
+                    st.caption(
+                        "Original-task axis NOT RUN: "
+                        + (
+                            sem["original_task_not_run_reason"]
+                            or "reason unavailable"
+                        )
+                    )
+                if not sem["assigned_subtask_assessed"]:
+                    st.caption(
+                        "Assigned-subtask axis NOT RUN: "
+                        + (
+                            sem["assigned_subtask_not_run_reason"]
+                            or "reason unavailable"
+                        )
+                    )
+                # Legacy fused values, unchanged field names/format.
+                st.caption(
                     f"task_similarity = {_fmt(sem['task_similarity'])}\n\n"
                     f"subtask_similarity = {_fmt(sem['subtask_similarity'])}\n\n"
                     f"objective_deviation = {_fmt(sem['objective_deviation'])}\n\n"
@@ -554,9 +764,12 @@ def render_chunk_card(chunk: dict, *, newest: bool = False) -> None:
                     f"confidence = {_fmt(sem['confidence'])}"
                 )
 
-        # -------- TIER 2 — NLI --------
+        # -------- TIER 2 — NLI TASK ALIGNMENT --------
         with col2:
-            st.markdown("**Tier 2 — NLI**")
+            st.markdown("**Tier 2 — NLI Task Alignment**")
+
+            # -- evidence axis (pre-existing; NOT a task-alignment premise).
+            st.markdown("**Evidence contradiction (pre-existing axis)**")
             nli_status = chunk_nli_status(chunk)
             nli = chunk.get("tier2_nli") or {}
             if nli_status == "not_run":
@@ -570,6 +783,21 @@ def render_chunk_card(chunk: dict, *, newest: bool = False) -> None:
                 st.caption(str(nli.get("premise") or "")[:800])
                 st.markdown("**Hypothesis:**")
                 st.caption(str(nli.get("hypothesis") or "")[:800])
+
+            st.divider()
+
+            # -- the two SEPARATE task-alignment families.
+            _render_reference_nli(
+                "Original-Task NLI (Primary)",
+                chunk_original_task_nli(chunk),
+                premise_label="original user prompt",
+            )
+            _render_reference_nli(
+                "Assigned-Subtask NLI (Secondary)",
+                chunk_assigned_subtask_nli(chunk),
+                premise_label="assigned subtask",
+            )
+
 
         # -------- TIER 3 — JUDGE --------
         with col3:
@@ -817,6 +1045,25 @@ def render() -> None:
                                 "investigation_required"
                             ),
                             "semantic_assessed": sec.get("semantic_assessed"),
+                            # Two independent reference axes.
+                            "original_task_assessed": sec.get(
+                                "original_task_assessed"
+                            ),
+                            "original_task_similarity": sec.get(
+                                "original_task_similarity"
+                            ),
+                            "original_task_deviation": sec.get(
+                                "original_task_deviation"
+                            ),
+                            "assigned_subtask_assessed": sec.get(
+                                "assigned_subtask_assessed"
+                            ),
+                            "assigned_subtask_similarity": sec.get(
+                                "assigned_subtask_similarity"
+                            ),
+                            "assigned_subtask_deviation": sec.get(
+                                "assigned_subtask_deviation"
+                            ),
                             "deviation_score": sec.get("deviation_score"),
                             "detector_result": sec.get("detector_result"),
                         }

@@ -3470,10 +3470,57 @@ class MASEnvironment:
         for decision in getattr(tiered, "chunk_decisions", []) or []:
 
             semantic = decision.semantic
+            # Tier 1 now keeps TWO INDEPENDENT reference axes:
+            #
+            #   original_task_*    -- PRIMARY (immutable user request)
+            #   assigned_subtask_* -- SECONDARY (delegated task; None when
+            #                         no subtask was assigned, never
+            #                         substituted by the original task)
+            #
+            # The legacy keys (task_similarity / subtask_similarity /
+            # objective_deviation / scope_deviation) are RETAINED as
+            # read-only aliases of those axes so existing readers keep
+            # working; the dashboard renders the explicit keys so one axis
+            # can never be displayed as if it were the other.
             semantic_payload = {
                 "assessed": bool(
                     semantic is not None and semantic.assessed
                 ),
+                # ---- PRIMARY axis: original user task ----
+                "original_task_assessed": bool(
+                    semantic is not None
+                    and semantic.original_task_assessed
+                ),
+                "original_task_similarity": (
+                    semantic.original_task_similarity
+                    if semantic is not None else None
+                ),
+                "original_task_deviation": (
+                    semantic.original_task_deviation
+                    if semantic is not None else None
+                ),
+                "original_task_not_run_reason": (
+                    semantic.original_task_not_run_reason
+                    if semantic is not None else ""
+                ),
+                # ---- SECONDARY axis: assigned subtask ----
+                "assigned_subtask_assessed": bool(
+                    semantic is not None
+                    and semantic.assigned_subtask_assessed
+                ),
+                "assigned_subtask_similarity": (
+                    semantic.assigned_subtask_similarity
+                    if semantic is not None else None
+                ),
+                "assigned_subtask_deviation": (
+                    semantic.assigned_subtask_deviation
+                    if semantic is not None else None
+                ),
+                "assigned_subtask_not_run_reason": (
+                    semantic.assigned_subtask_not_run_reason
+                    if semantic is not None else ""
+                ),
+                # ---- LEGACY ALIASES (unchanged key names/meaning) ----
                 "task_similarity": (
                     semantic.task_similarity if semantic is not None else None
                 ),
@@ -3533,12 +3580,61 @@ class MASEnvironment:
                     "chunk_text": decision.chunk_text,
                     "tiers_ran": list(decision.tiers_ran or []),
                     "tier1_semantic": semantic_payload,
+                    # PRE-EXISTING evidence axis: the delivered EVIDENCE is
+                    # the premise. Kept for the Tier-3 gate/provenance; it
+                    # is NOT the task-alignment result.
                     "tier2_nli": nli_payload,
+                    # TASK-ALIGNMENT axes (added): the reference is the
+                    # premise and the extracted response claim is the
+                    # hypothesis. Explicit, separate fields so one can
+                    # never overwrite the other.
+                    "tier2_original_task_nli": (
+                        self._serialize_reference_nli(
+                            decision.original_task_nli,
+                            nli_source=nli_source,
+                        )
+                    ),
+                    "tier2_assigned_subtask_nli": (
+                        self._serialize_reference_nli(
+                            decision.assigned_subtask_nli,
+                            nli_source=nli_source,
+                        )
+                    ),
                     "tier3_judge": judge_payload,
                 }
             )
 
         return chunks
+
+    @staticmethod
+    def _serialize_reference_nli(
+        summary,
+        *,
+        nli_source: str,
+    ) -> dict:
+        """
+        Serialise ONE ``ReferenceNLISummary`` (task-alignment NLI).
+
+        Serialisation only: the summary is the observer's already-computed
+        result, so nothing is recomputed and nothing is fabricated. A
+        missing summary is published as an explicit NOT RUN block with a
+        reason.
+        """
+
+        if summary is None:
+            return {
+                "ran": False,
+                "source": "not_run",
+                "not_run_reason": (
+                    "task-alignment NLI did not run for this chunk"
+                ),
+                "claims": [],
+            }
+
+        payload = summary.to_dict()
+        payload["source"] = nli_source
+        return payload
+
 
     # =========================================================
     # PUBLISH AGENT RESULT
@@ -3714,6 +3810,38 @@ class MASEnvironment:
                             observation.investigation_required,
                         "semantic_assessed": bool(
                             assessment and assessment.assessed
+                        ),
+                        # Explicit reference axes (whole-response base
+                        # assessment): original task = PRIMARY, assigned
+                        # subtask = SECONDARY. The task_similarity /
+                        # subtask_similarity keys below remain as their
+                        # legacy aliases.
+                        "original_task_assessed": bool(
+                            assessment and assessment.original_task_assessed
+                        ),
+                        "original_task_similarity": (
+                            assessment.original_task_similarity
+                            if assessment and assessment.assessed else None
+                        ),
+                        "original_task_deviation": (
+                            assessment.original_task_deviation
+                            if assessment and assessment.assessed else None
+                        ),
+                        "assigned_subtask_assessed": bool(
+                            assessment
+                            and assessment.assigned_subtask_assessed
+                        ),
+                        "assigned_subtask_similarity": (
+                            assessment.assigned_subtask_similarity
+                            if assessment and assessment.assessed else None
+                        ),
+                        "assigned_subtask_deviation": (
+                            assessment.assigned_subtask_deviation
+                            if assessment and assessment.assessed else None
+                        ),
+                        "assigned_subtask_not_run_reason": (
+                            assessment.assigned_subtask_not_run_reason
+                            if assessment and assessment.assessed else ""
                         ),
                         "task_similarity": (
                             assessment.task_similarity

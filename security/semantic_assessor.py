@@ -67,44 +67,143 @@ def _as_text(value) -> str:
     return str(value).strip()
 
 
+# Explicit "not measured" reasons, surfaced verbatim by the dashboard.
+MISSING_ORIGINAL_TASK_REASON = "original task is missing or empty"
+MISSING_SUBTASK_REASON = "assigned subtask is missing or empty"
+
+
 @dataclass
 class SemanticAssessment:
     """
-    Semantic assessment of an agent output.
+    Semantic assessment of ONE agent output (or one response chunk).
 
-    All scores are normalized to [0, 1].
+    TWO INDEPENDENT REFERENCE AXES are computed and stored side by side:
+
+      * ORIGINAL-TASK axis -- PRIMARY, trusted and immutable
+            reference = ``original_task``    candidate = ``agent_output``
+        stored in ``original_task_similarity`` / ``original_task_deviation``
+
+      * ASSIGNED-SUBTASK axis -- SECONDARY, delegated
+            reference = ``assigned_subtask`` candidate = ``agent_output``
+        stored in ``assigned_subtask_similarity`` /
+        ``assigned_subtask_deviation``
+
+    The two axes are NEVER merged into one another and the assigned subtask
+    never replaces (or modifies) the original-task reference. When the
+    subtask is missing/empty the secondary axis is explicitly NOT RUN --
+    ``assigned_subtask_assessed`` is False, the ``assigned_subtask_*``
+    scores are ``None`` and ``assigned_subtask_not_run_reason`` explains
+    why -- instead of silently substituting the original task.
+
+    All scores are normalized to [0, 1]; ``None`` means "not measured".
+
+    Backward compatibility
+    ----------------------
+    ``task_similarity``, ``subtask_similarity``, ``objective_deviation``
+    and ``scope_deviation`` are retained as READ-ONLY aliases of the axis
+    fields (the subtask aliases report 0.0 when the secondary axis did not
+    run) so the state builder, the experiments and existing parsers keep
+    working unchanged.
     """
 
-    task_similarity: float = 0.0
-    subtask_similarity: float = 0.0
-    objective_deviation: float = 0.0
-    scope_deviation: float = 0.0
+    # ---- PRIMARY axis: the original user task (trusted, immutable) ----
+    original_task_similarity: float = 0.0
+    original_task_deviation: float = 0.0
+    original_task_assessed: bool = False
+    original_task_not_run_reason: str = ""
+
+    # ---- SECONDARY axis: the task assigned to this agent (delegated) ----
+    assigned_subtask_similarity: Optional[float] = None
+    assigned_subtask_deviation: Optional[float] = None
+    assigned_subtask_assessed: bool = False
+    assigned_subtask_not_run_reason: str = ""
+
     confidence: float = 0.0
     assessed: bool = False
+
+    # =========================================================
+    # LEGACY ALIASES (read-only; documented meaning)
+    # =========================================================
+
+    @property
+    def task_similarity(self) -> float:
+        """Legacy alias of ``original_task_similarity``."""
+        return self.original_task_similarity
+
+    @property
+    def subtask_similarity(self) -> float:
+        """
+        Legacy alias of ``assigned_subtask_similarity``.
+
+        Reports 0.0 when the secondary axis did not run (missing subtask);
+        it never falls back to the original-task score.
+        """
+        return float(self.assigned_subtask_similarity or 0.0)
+
+    @property
+    def objective_deviation(self) -> float:
+        """Legacy alias of ``original_task_deviation``."""
+        return self.original_task_deviation
+
+    @property
+    def scope_deviation(self) -> float:
+        """
+        Legacy alias of ``assigned_subtask_deviation``.
+
+        Reports 0.0 when the secondary axis did not run (missing subtask).
+        """
+        return float(self.assigned_subtask_deviation or 0.0)
 
     @property
     def deviation_score(self) -> float:
         """
-        Combined semantic deviation.
+        Fused semantic deviation.
 
-        Higher value means greater deviation from the intended task.
+        The ORIGINAL-TASK axis drives this value; the assigned-subtask axis
+        is blended in only when it actually ran, so a high subtask
+        similarity can never cancel a low original-task similarity and a
+        missing subtask never fabricates one.
+
+        Subtask axis available (identical to the pre-split formula, because
+        objective/scope deviation are the complements of the two
+        similarities)::
+
+            0.5 * (1 - mean(task_sim, subtask_sim))
+          + 0.3 * objective_deviation
+          + 0.2 * scope_deviation
+
+        Subtask axis NOT available -- the original task is the only
+        reference, so every weight falls on it::
+
+            0.5 * (1 - task_sim)
+          + 0.3 * task_deviation
+          + 0.2 * task_deviation          # == 1 - task_sim
         """
-        similarity = (
-            0.5 * self.task_similarity
-            + 0.5 * self.subtask_similarity
-        )
 
-        semantic_distance = 1.0 - similarity
+        task_distance = 1.0 - self.original_task_similarity
 
-        return max(
-            0.0,
-            min(
-                1.0,
-                0.5 * semantic_distance
-                + 0.3 * self.objective_deviation
-                + 0.2 * self.scope_deviation,
-            ),
-        )
+        if (
+            self.assigned_subtask_assessed
+            and self.assigned_subtask_similarity is not None
+            and self.assigned_subtask_deviation is not None
+        ):
+            combined_distance = (
+                0.5 * task_distance
+                + 0.5 * (1.0 - self.assigned_subtask_similarity)
+            )
+            blended = (
+                0.5 * combined_distance
+                + 0.3 * self.original_task_deviation
+                + 0.2 * self.assigned_subtask_deviation
+            )
+        else:
+            blended = (
+                0.5 * task_distance
+                + 0.3 * self.original_task_deviation
+                + 0.2 * self.original_task_deviation
+            )
+
+        return max(0.0, min(1.0, blended))
 
 
 def split_into_chunks(
@@ -371,12 +470,16 @@ class SemanticAssessor:
         agent_output: str,
     ) -> SemanticAssessment:
         """
-        Assess an agent output against the original task and the
-        subtask the agent was assigned.
+        Assess an agent output against TWO separate references:
 
-        Similarity is computed with real sentence embeddings. A
-        missing/empty subtask falls back to the original task so that
-        the "subtask" axis stays well defined.
+          * the ORIGINAL USER TASK (primary, immutable),
+          * the ASSIGNED SUBTASK (secondary, delegated).
+
+        Similarity is computed with real sentence embeddings. Each axis is
+        embedded and scored independently; the assigned subtask is NEVER
+        used to replace the original-task reference, and a missing/empty
+        subtask leaves the secondary axis explicitly NOT RUN (scores are
+        ``None`` and a reason is recorded) instead of fabricating a score.
         """
 
         # Agent outputs may arrive as non-string content (e.g. a
@@ -392,65 +495,95 @@ class SemanticAssessor:
 
         if not agent_output:
             return SemanticAssessment(
-                task_similarity=0.0,
-                subtask_similarity=0.0,
-                objective_deviation=1.0,
-                scope_deviation=1.0,
+                original_task_similarity=0.0,
+                original_task_deviation=1.0,
+                original_task_assessed=bool(original_task),
+                original_task_not_run_reason=(
+                    "" if original_task
+                    else MISSING_ORIGINAL_TASK_REASON
+                ),
+                assigned_subtask_similarity=(
+                    0.0 if assigned_subtask else None
+                ),
+                assigned_subtask_deviation=(
+                    1.0 if assigned_subtask else None
+                ),
+                assigned_subtask_assessed=bool(assigned_subtask),
+                assigned_subtask_not_run_reason=(
+                    "" if assigned_subtask else MISSING_SUBTASK_REASON
+                ),
                 confidence=1.0,
                 assessed=True,
             )
 
         # -----------------------------------------------------
-        # Without a reference task there is nothing to anchor to.
+        # With NO reference at all there is nothing to anchor to.
         # -----------------------------------------------------
 
         if not original_task and not assigned_subtask:
             return SemanticAssessment(
+                original_task_not_run_reason=MISSING_ORIGINAL_TASK_REASON,
+                assigned_subtask_not_run_reason=MISSING_SUBTASK_REASON,
                 confidence=0.0,
                 assessed=False,
             )
 
-        reference_subtask = (
-            assigned_subtask or original_task
-        )
+        # -----------------------------------------------------
+        # Embed every reference SEPARATELY (one batched call) so neither
+        # axis can overwrite the other. The original task is embedded as
+        # itself and is never substituted by the assigned subtask.
+        # -----------------------------------------------------
 
-        embeddings = self._embed(
-            [
-                original_task or assigned_subtask,
-                reference_subtask,
-                agent_output,
-            ]
-        )
+        to_embed: list[str] = []
+        index_of: dict[str, int] = {}
 
-        task_embedding = embeddings[0]
-        subtask_embedding = embeddings[1]
-        output_embedding = embeddings[2]
+        if original_task:
+            index_of["original_task"] = len(to_embed)
+            to_embed.append(original_task)
 
-        task_similarity = self._normalize_similarity(
-            _cosine_similarity(
-                task_embedding,
-                output_embedding,
+        if assigned_subtask:
+            index_of["assigned_subtask"] = len(to_embed)
+            to_embed.append(assigned_subtask)
+
+        index_of["output"] = len(to_embed)
+        to_embed.append(agent_output)
+
+        embeddings = self._embed(to_embed)
+        output_embedding = embeddings[index_of["output"]]
+
+        # ---- PRIMARY axis: original user task -----------------------
+        original_task_assessed = "original_task" in index_of
+        original_task_similarity = 0.0
+        original_task_deviation = 0.0
+
+        if original_task_assessed:
+            original_task_similarity = self._normalize_similarity(
+                _cosine_similarity(
+                    embeddings[index_of["original_task"]],
+                    output_embedding,
+                )
             )
-        )
-
-        subtask_similarity = self._normalize_similarity(
-            _cosine_similarity(
-                subtask_embedding,
-                output_embedding,
+            # How far the output drifts from the immutable user task.
+            original_task_deviation = _clamp01(
+                1.0 - original_task_similarity
             )
-        )
 
-        # Objective deviation: how far the output drifts from the
-        # immutable user task.
-        objective_deviation = _clamp01(
-            1.0 - task_similarity
-        )
+        # ---- SECONDARY axis: assigned subtask -----------------------
+        assigned_subtask_assessed = "assigned_subtask" in index_of
+        assigned_subtask_similarity: Optional[float] = None
+        assigned_subtask_deviation: Optional[float] = None
 
-        # Scope deviation: how far the output drifts from the specific
-        # subtask this agent was asked to perform.
-        scope_deviation = _clamp01(
-            1.0 - subtask_similarity
-        )
+        if assigned_subtask_assessed:
+            assigned_subtask_similarity = self._normalize_similarity(
+                _cosine_similarity(
+                    embeddings[index_of["assigned_subtask"]],
+                    output_embedding,
+                )
+            )
+            # How far the output drifts from the delegated subtask.
+            assigned_subtask_deviation = _clamp01(
+                1.0 - assigned_subtask_similarity
+            )
 
         confidence = self._confidence_for(
             agent_output,
@@ -458,12 +591,24 @@ class SemanticAssessor:
         )
 
         return SemanticAssessment(
-            task_similarity=task_similarity,
-            subtask_similarity=subtask_similarity,
-            objective_deviation=objective_deviation,
-            scope_deviation=scope_deviation,
+            original_task_similarity=original_task_similarity,
+            original_task_deviation=original_task_deviation,
+            original_task_assessed=original_task_assessed,
+            original_task_not_run_reason=(
+                "" if original_task_assessed
+                else MISSING_ORIGINAL_TASK_REASON
+            ),
+            assigned_subtask_similarity=assigned_subtask_similarity,
+            assigned_subtask_deviation=assigned_subtask_deviation,
+            assigned_subtask_assessed=assigned_subtask_assessed,
+            assigned_subtask_not_run_reason=(
+                "" if assigned_subtask_assessed
+                else MISSING_SUBTASK_REASON
+            ),
             confidence=confidence,
-            assessed=True,
+            assessed=bool(
+                original_task_assessed or assigned_subtask_assessed
+            ),
         )
 
     def assess_chunked(

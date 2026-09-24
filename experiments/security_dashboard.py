@@ -66,6 +66,19 @@ class ChunkRow:
 
     # ---- Tier 1: chunked semantic ----
     semantic_assessed: bool = False
+
+    # Two INDEPENDENT reference axes (explicit, never merged).
+    # PRIMARY: original user task.
+    original_task_assessed: bool = False
+    original_task_similarity: Optional[float] = None
+    original_task_deviation: Optional[float] = None
+    # SECONDARY: assigned subtask (None/False when no subtask existed).
+    assigned_subtask_assessed: bool = False
+    assigned_subtask_similarity: Optional[float] = None
+    assigned_subtask_deviation: Optional[float] = None
+    assigned_subtask_not_run_reason: str = ""
+
+    # LEGACY aliases of the two axes (kept for existing readers).
     task_similarity: float = 0.0
     subtask_similarity: float = 0.0
     objective_deviation: float = 0.0
@@ -73,12 +86,27 @@ class ChunkRow:
     deviation_score: float = 0.0
     semantic_confidence: float = 0.0
 
-    # ---- Tier 2: NLI contradiction ----
+    # ---- Tier 2: evidence NLI contradiction (pre-existing axis) ----
     nli_ran: bool = False
     nli_label: str = ""
     nli_confidence: float = 0.0
     nli_premise: str = ""
     nli_hypothesis: str = ""
+
+    # ---- Tier 2: TASK-ALIGNMENT NLI (two separate families) ----
+    # PRIMARY: premise = original user task.
+    original_task_nli_ran: bool = False
+    original_task_nli_label: str = ""
+    original_task_nli_confidence: float = 0.0
+    original_task_nli_premise: str = ""
+    original_task_nli_hypothesis: str = ""
+    # SECONDARY: premise = assigned subtask (NOT_RUN without a subtask).
+    assigned_subtask_nli_ran: bool = False
+    assigned_subtask_nli_label: str = ""
+    assigned_subtask_nli_confidence: float = 0.0
+    assigned_subtask_nli_premise: str = ""
+    assigned_subtask_nli_hypothesis: str = ""
+    assigned_subtask_nli_not_run_reason: str = ""
 
     # ---- Tier 3: judge ----
     tier3_ran: bool = False
@@ -178,6 +206,36 @@ def chunk_row_from_decision(decision) -> ChunkRow:
     semantic = decision.semantic
     if semantic is not None and getattr(semantic, "assessed", False):
         row.semantic_assessed = True
+
+        # Two INDEPENDENT reference axes (explicit fields).
+        row.original_task_assessed = bool(
+            getattr(semantic, "original_task_assessed", False)
+        )
+        row.original_task_similarity = (
+            semantic.original_task_similarity
+            if row.original_task_assessed else None
+        )
+        row.original_task_deviation = (
+            semantic.original_task_deviation
+            if row.original_task_assessed else None
+        )
+
+        row.assigned_subtask_assessed = bool(
+            getattr(semantic, "assigned_subtask_assessed", False)
+        )
+        row.assigned_subtask_similarity = (
+            semantic.assigned_subtask_similarity
+            if row.assigned_subtask_assessed else None
+        )
+        row.assigned_subtask_deviation = (
+            semantic.assigned_subtask_deviation
+            if row.assigned_subtask_assessed else None
+        )
+        row.assigned_subtask_not_run_reason = getattr(
+            semantic, "assigned_subtask_not_run_reason", ""
+        )
+
+        # Legacy aliases of the same two axes.
         row.task_similarity = float(semantic.task_similarity)
         row.subtask_similarity = float(semantic.subtask_similarity)
         row.objective_deviation = float(semantic.objective_deviation)
@@ -192,6 +250,25 @@ def chunk_row_from_decision(decision) -> ChunkRow:
         row.nli_confidence = float(contradiction.confidence)
         row.nli_premise = contradiction.premise
         row.nli_hypothesis = contradiction.hypothesis
+
+    # ---- Tier 2 TASK-ALIGNMENT NLI: two SEPARATE families ----
+    # (serialised from the observer's already-computed summaries).
+    original_nli = getattr(decision, "original_task_nli", None)
+    if original_nli is not None:
+        row.original_task_nli_ran = bool(original_nli.ran)
+        row.original_task_nli_label = original_nli.label
+        row.original_task_nli_confidence = float(original_nli.confidence)
+        row.original_task_nli_premise = original_nli.premise
+        row.original_task_nli_hypothesis = original_nli.hypothesis
+
+    subtask_nli = getattr(decision, "assigned_subtask_nli", None)
+    if subtask_nli is not None:
+        row.assigned_subtask_nli_ran = bool(subtask_nli.ran)
+        row.assigned_subtask_nli_label = subtask_nli.label
+        row.assigned_subtask_nli_confidence = float(subtask_nli.confidence)
+        row.assigned_subtask_nli_premise = subtask_nli.premise
+        row.assigned_subtask_nli_hypothesis = subtask_nli.hypothesis
+        row.assigned_subtask_nli_not_run_reason = subtask_nli.not_run_reason
 
     verdict = decision.tier3_verdict
     if verdict is not None:
@@ -409,6 +486,41 @@ def dump_dashboard(dashboard: EpisodeDashboard) -> None:
                     f"subtask_sim={chunk.subtask_similarity:.4f} "
                     f"conf={chunk.semantic_confidence:.4f}"
                 )
+                # Two INDEPENDENT Tier-1 reference axes.
+                original_axis = (
+                    f"{chunk.original_task_similarity:.4f}"
+                    if chunk.original_task_assessed
+                    and chunk.original_task_similarity is not None
+                    else "NOT RUN"
+                )
+                original_dev = (
+                    f"{chunk.original_task_deviation:.4f}"
+                    if chunk.original_task_assessed
+                    and chunk.original_task_deviation is not None
+                    else "NOT RUN"
+                )
+                subtask_axis = (
+                    f"{chunk.assigned_subtask_similarity:.4f}"
+                    if chunk.assigned_subtask_assessed
+                    and chunk.assigned_subtask_similarity is not None
+                    else "NOT RUN"
+                )
+                subtask_dev = (
+                    f"{chunk.assigned_subtask_deviation:.4f}"
+                    if chunk.assigned_subtask_assessed
+                    and chunk.assigned_subtask_deviation is not None
+                    else "NOT RUN"
+                )
+                print(
+                    f"    Tier1 axes: original_task(sim={original_axis}, "
+                    f"dev={original_dev}) | assigned_subtask("
+                    f"sim={subtask_axis}, dev={subtask_dev})"
+                )
+                if not chunk.assigned_subtask_assessed:
+                    print(
+                        "      assigned_subtask axis NOT RUN: "
+                        f"{chunk.assigned_subtask_not_run_reason}"
+                    )
             else:
                 print("    Tier1 sem : (not assessed)")
             if chunk.nli_ran:
@@ -419,6 +531,27 @@ def dump_dashboard(dashboard: EpisodeDashboard) -> None:
                 )
             else:
                 print("    Tier2 NLI : (not run)")
+            # TASK-ALIGNMENT NLI: two separate families, shown separately.
+            if chunk.original_task_nli_ran:
+                print(
+                    f"    OTask NLI : label={chunk.original_task_nli_label} "
+                    f"conf={chunk.original_task_nli_confidence:.4f} "
+                    f"(premise=original task, hypothesis=chunk claim)"
+                )
+            else:
+                print("    OTask NLI : (not run)")
+            if chunk.assigned_subtask_nli_ran:
+                print(
+                    f"    ASub NLI  : label="
+                    f"{chunk.assigned_subtask_nli_label} "
+                    f"conf={chunk.assigned_subtask_nli_confidence:.4f} "
+                    f"(premise=assigned subtask, hypothesis=chunk claim)"
+                )
+            else:
+                print(
+                    "    ASub NLI  : (not run) "
+                    f"{chunk.assigned_subtask_nli_not_run_reason}"
+                )
             if chunk.tier3_ran:
                 print(
                     f"    Tier3 judge: contradicts="

@@ -16,6 +16,7 @@ from .semantic_assessor import (
 from .contradiction_checker import (
     ContradictionChecker,
     ContradictionResult,
+    ReferenceNLISummary,
     LABEL_CONTRADICTION,
 )
 from .llm_judge import LLMJudge, JudgeVerdict
@@ -100,16 +101,48 @@ class ChunkDecision:
     """
     Per-chunk record of which tiers ran and what they produced.
 
+    The chunk carries TWO INDEPENDENT SIGNAL FAMILIES, kept in separate
+    fields so neither can overwrite the other:
+
+      * Tier 1 semantic (``semantic``): the ``SemanticAssessment`` holds
+        the original-task axis AND the assigned-subtask axis separately.
+
+      * Tier 2 task-alignment NLI -- one check per reference family, both
+        run over the SAME extracted response claims of this chunk's text:
+
+          ``original_task_nli``      premise = original user task
+                                     (PRIMARY alignment signal)
+          ``assigned_subtask_nli``   premise = assigned subtask
+                                     (SECONDARY diagnostic signal; its
+                                     ``ran`` is False with a reason when
+                                     no subtask was assigned)
+
+      * Tier 2 evidence NLI (``contradiction``): the PRE-EXISTING axis in
+        which the delivered EVIDENCE is the premise. It is retained for
+        the Tier-3 gate, provenance and root-cause tracing and is NEVER
+        the authoritative task-alignment premise.
+
     ``tiers_ran`` lists the tier names that executed for this chunk
-    ("tier1", "tier2", "tier3"). ``tier3_verdict`` is populated only
-    when Tier 3 actually ran (i.e. the Tier-2 contradiction gate was
-    exceeded).
+    ("tier1", "tier2", "tier3") where "tier2" marks the evidence-NLI
+    axis (unchanged). ``tier3_verdict`` is populated only when Tier 3
+    actually ran (i.e. the Tier-2 contradiction gate was exceeded).
     """
 
     chunk_index: int
     chunk_text: str
+
+    # ---- Tier 1: TWO semantic reference axes inside one assessment ----
     semantic: Optional[SemanticAssessment] = None
+
+    # ---- Tier 2: TASK-ALIGNMENT NLI (original task = primary) ----
+    original_task_nli: Optional[ReferenceNLISummary] = None
+
+    # ---- Tier 2: TASK-ALIGNMENT NLI (assigned subtask = secondary) ----
+    assigned_subtask_nli: Optional[ReferenceNLISummary] = None
+
+    # ---- Tier 2: EVIDENCE-based NLI (pre-existing axis) ----
     contradiction: Optional[ContradictionResult] = None
+
     tier3_verdict: Optional[JudgeVerdict] = None
     tiers_ran: list[str] = field(default_factory=list)
 
@@ -393,11 +426,15 @@ class SecurityObserver:
 
         Per chunk of ``response`` (paragraph-aware ~150-200 word chunks):
 
-          * Tier 1 - chunked semantic deviation (always runs).
+          * Tier 1 - chunked semantic deviation (always runs). It records
+            the ORIGINAL-TASK axis and the ASSIGNED-SUBTASK axis
+            separately (never merged, never substituted for one another).
           * Tier 2 - the existing rule/content detector (scoped to the
-            whole response) plus NLI contradiction of the chunk against
-            ``evidence_chunks`` (always runs per chunk, when a
-            contradiction checker is configured).
+            whole response), the two TASK-ALIGNMENT NLI families (the
+            original user task as premise -- primary -- and the assigned
+            subtask as premise -- secondary), plus NLI contradiction of
+            the chunk against ``evidence_chunks`` (when a contradiction
+            checker is configured).
           * Tier 3 - the LLM judge, run ONLY on chunks whose Tier-2
             contradiction confidence EXCEEDS
             ``tier3_contradiction_threshold`` (a named constant, see
@@ -412,7 +449,9 @@ class SecurityObserver:
         ``evidence_chunks`` is the linked evidence for this response
         (see security/evidence_linker.py). When empty, Tier 2's NLI and
         Tier 3 simply have nothing to check against and are skipped for
-        the contradiction axis.
+        the contradiction axis. The two task-alignment NLI families are
+        NOT evidence checks: they do not use the evidence as a premise
+        and still run when ``evidence_chunks`` is empty.
         """
 
         return self._run_tiered_pipeline(
@@ -507,6 +546,32 @@ class SecurityObserver:
                 semantic=semantic,
                 tiers_ran=["tier1"],
             )
+
+            # ---- Tier 2a: TASK-ALIGNMENT NLI (two separate families) ----
+            #
+            # The SAME authoritative ``chunk_text`` Tier 1 used is handed
+            # to the checker. It extracts the response claims ONCE and
+            # runs BOTH reference families over that identical claim list:
+            #
+            #     original user task  -> premise (PRIMARY)
+            #     assigned subtask    -> premise (SECONDARY)
+            #
+            # Neither family uses retrieved content, tool output, memory
+            # or evidence as its premise, and neither result overwrites
+            # the other. They run whenever a checker is configured -- they
+            # are NOT gated on evidence being available.
+            if self.contradiction_checker is not None:
+                (
+                    decision.original_task_nli,
+                    decision.assigned_subtask_nli,
+                ) = (
+                    self.contradiction_checker
+                    .check_chunk_against_task_and_subtask(
+                        chunk_text=chunk_text,
+                        original_task=original_task,
+                        assigned_subtask=assigned_subtask,
+                    )
+                )
 
             # ---- Tier 2b: NLI contradiction vs linked evidence ----
             if self.contradiction_checker is not None and evidence_list:
