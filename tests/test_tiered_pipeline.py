@@ -238,6 +238,211 @@ class LoggingTests(unittest.TestCase):
         self.assertTrue(result.semantic_assessment.assessed)
 
 
+class SharedChunkTests(unittest.TestCase):
+    """
+    The EXACT SAME response chunk must be used by Tier 1 (semantic) and
+    Tier 2 (NLI).
+
+    The authoritative chunks are produced once, by the existing
+    ``SemanticAssessor`` (``assess_chunked`` -> ``chunked.chunk_texts``);
+    Tier 2 must consume those chunk TEXTS, not a second chunking of the
+    response. These tests record the actual text handed to each tier and
+    compare it, so a second/re-split chunking mechanism would fail them.
+    """
+
+    def test_same_chunk_text_reaches_both_tiers(self):
+        """
+        Every chunk text used by Tier 1 == the chunk text used by Tier 2,
+        for every index -- verified on the TEXT, not just the index.
+        """
+
+        # The NLI stub records the exact hypothesis (the agent chunk it
+        # was asked about), so we can compare it against the chunks the
+        # semantic assessor produced.
+        seen_hypotheses: list[str] = []
+
+        class _RecordingNLI:
+            def __call__(self, inputs, truncation=True):
+                seen_hypotheses.append(str(inputs["text_pair"]))
+                return [
+                    {"label": "neutral", "score": 0.8},
+                    {"label": "entailment", "score": 0.1},
+                    {"label": "contradiction", "score": 0.1},
+                ]
+
+        assessor = SemanticAssessor(model=_KeywordEncoder())
+        observer = SecurityObserver(
+            semantic_assessor=assessor,
+            contradiction_checker=ContradictionChecker(
+                model=_RecordingNLI()
+            ),
+            log_enabled=False,
+        )
+
+        response = (
+            ("AI improves cyber security threat detection and network "
+             "defence. ") * 40
+            + "\n\n"
+            + ("Threat detection uses machine learning on network traffic. ")
+            * 40
+            + "\n\n"
+            + ("Cookie recipe with butter and sugar: bake until golden. ")
+            * 40
+        )
+
+        # The authoritative chunks: exactly what the semantic assessor
+        # (Tier 1) split the response into.
+        expected = assessor.assess_chunked(
+            original_task=TASK,
+            assigned_subtask=TASK,
+            agent_output=response,
+        ).chunk_texts
+        self.assertGreaterEqual(len(expected), 2, "need multiple chunks")
+
+        result = observer.observe_tiered(
+            agent_id="researcher",
+            response=response,
+            original_task=TASK,
+            assigned_subtask=TASK,
+            evidence_chunks=EVIDENCE,
+            events=[],
+        )
+
+        # Tier 1 chunk (ChunkDecision.chunk_text) == semantic chunk.
+        semantic_chunks = [d.chunk_text for d in result.chunk_decisions]
+        self.assertEqual(semantic_chunks, expected)
+
+        # Tier 2 ran for every chunk (evidence was supplied).
+        for decision in result.chunk_decisions:
+            self.assertIn("tier2", decision.tiers_ran)
+            self.assertIsNotNone(decision.contradiction)
+
+            nli_chunk = decision.contradiction.hypothesis
+            # NLI internally splits the chunk into sentences, so the
+            # hypothesis is a SENTENCE of the SAME chunk -- never some
+            # other chunk, and never a re-chunking of the response.
+            self.assertTrue(
+                nli_chunk in decision.chunk_text,
+                "Tier 2 hypothesis is not part of the Tier 1 chunk",
+            )
+            self.assertIn(
+                decision.chunk_text,
+                expected,
+                "Tier 2 consumed a chunk Tier 1 never produced",
+            )
+
+        # Chunk-by-chunk: Chunk i used by Semantic == Chunk i used by NLI.
+        for index, decision in enumerate(result.chunk_decisions):
+            self.assertEqual(
+                decision.chunk_text,
+                expected[index],
+                f"chunk {index} differs between tiers",
+            )
+            # Tier 2's hypothesis for chunk i comes from chunk i itself.
+            self.assertIn(
+                decision.contradiction.hypothesis,
+                expected[index],
+                f"Tier 2 read a different chunk at index {index}",
+            )
+
+        # Every recorded NLI hypothesis belongs to some Tier-1 chunk,
+        # i.e. no chunk was invented by the NLI path.
+        self.assertTrue(seen_hypotheses, "NLI was never called")
+        for hypothesis in seen_hypotheses:
+            self.assertTrue(
+                any(hypothesis in chunk for chunk in expected),
+                "NLI was asked about text outside the Tier-1 chunks",
+            )
+
+    def test_evidence_is_premise_and_chunk_is_hypothesis(self):
+        """Direction must be evidence -> premise, chunk -> hypothesis."""
+
+        observer = SecurityObserver(
+            semantic_assessor=SemanticAssessor(model=_KeywordEncoder()),
+            contradiction_checker=ContradictionChecker(model=_SweepNLI()),
+            log_enabled=False,
+        )
+
+        evidence = "AI detects threats in real time."
+        result = observer.observe_tiered(
+            agent_id="researcher",
+            response=(
+                ("STRONGCONTRADICT AI offers no benefit. ") * 40
+            ),
+            original_task=TASK,
+            assigned_subtask=TASK,
+            evidence_chunks=[evidence],
+            events=[],
+        )
+
+        decision = result.chunk_decisions[0]
+        self.assertEqual(decision.contradiction.premise, evidence)
+        # The hypothesis is a sentence of the chunk used by Tier 1.
+        self.assertIn(
+            decision.contradiction.hypothesis,
+            decision.chunk_text,
+        )
+        self.assertNotEqual(
+            decision.contradiction.premise,
+            decision.contradiction.hypothesis,
+        )
+
+    def test_nli_is_not_called_when_no_evidence(self):
+        """No evidence -> no Tier 2, and no chunking work for NLI at all."""
+
+        calls: list[str] = []
+
+        class _RecordingNLI:
+            def __call__(self, inputs, truncation=True):
+                calls.append(str(inputs["text_pair"]))
+                return [{"label": "neutral", "score": 1.0}]
+
+        observer = SecurityObserver(
+            semantic_assessor=SemanticAssessor(model=_KeywordEncoder()),
+            contradiction_checker=ContradictionChecker(model=_RecordingNLI()),
+            log_enabled=False,
+        )
+
+        result = observer.observe_tiered(
+            agent_id="researcher",
+            response=ON_TOPIC,
+            original_task=TASK,
+            assigned_subtask=TASK,
+            evidence_chunks=[],
+            events=[],
+        )
+
+        self.assertEqual(calls, [])
+        for decision in result.chunk_decisions:
+            self.assertEqual(decision.tiers_ran, ["tier1"])
+            self.assertIsNone(decision.contradiction)
+
+    def test_chunk_decision_retains_index_text_semantic_and_nli(self):
+        """Each decision keeps chunk_index, chunk_text, semantic + NLI."""
+
+        observer = _observer()
+        result = observer.observe_tiered(
+            agent_id="researcher",
+            response=(
+                ON_TOPIC
+                + "\n\n"
+                + ("STRONGCONTRADICT AI offers no benefit. " * 24)
+            ),
+            original_task=TASK,
+            assigned_subtask=TASK,
+            evidence_chunks=EVIDENCE,
+            events=[],
+        )
+
+        for index, decision in enumerate(result.chunk_decisions):
+            self.assertEqual(decision.chunk_index, index)
+            self.assertTrue(decision.chunk_text.strip())
+            self.assertIsNotNone(decision.semantic)
+            self.assertIsNotNone(decision.contradiction)
+            self.assertIn("tier1", decision.tiers_ran)
+            self.assertIn("tier2", decision.tiers_ran)
+
+
 class GuardTests(unittest.TestCase):
 
     def test_tiered_path_rejects_ground_truth_artifacts(self):
