@@ -136,8 +136,10 @@ reports/generated/
 # experiments/: generated data/outputs stay ignored, but the
 # experiment SCRIPTS themselves are source and must be tracked
 # (otherwise new evaluation/calibration scripts are never committed).
+# The README is documentation and is tracked too.
 experiments/**
 !experiments/*.py
+!experiments/README.md
 
 # Large experiment artifacts
 *.pkl
