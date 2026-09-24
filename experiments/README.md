@@ -37,13 +37,27 @@ seeds, against three independent label sources (`exposure`,
 `outcome_judge`, and the legacy `indicator_legacy` reported only as
 "circularity inflation"). Also compares the three Tier-3 investigation
 strategies (formula / brute_force / no_investigation).
+
+With the OPTIONAL `--remediation` flag it additionally runs every
+episode TWICE (with `MAS_REMEDIATION_ENABLED` off, then on) and writes a
+remediation-comparison table: the ADDED token/LLM-call cost remediation
+incurred, and whether the FINAL task output changed / improved. Output
+"improvement" uses the `semantic_deviation_delta` QUALITY PROXY (the
+same semantic-deviation check the detector uses) — this is a PROXY, NOT
+a full quality judge (which is out of scope), and the CSV labels it as
+such. `--remediation` is OFF by default and does not change the headline
+evaluation.
 **Real by default:** yes — runs real episodes and the real MiniLM + real
-LLM judge unless `--stub-*` is passed. Stubs are opt-in.
+LLM judge unless `--stub-*` is passed. Stubs are opt-in. (With
+`--stub-judge`, the stub judge rarely confirms a contradiction, so the
+remediation rows will honestly report `remediation_triggered=0`.)
 **Trustworthy run:**
 ```
 python -m experiments.eval_detector
+python -m experiments.eval_detector --remediation        # + comparison
 ```
-Writes `outputs/eval_detector_{response,episode,strategy}.csv`.
+Writes `outputs/eval_detector_{response,episode,strategy}.csv` and,
+with `--remediation`, `outputs/eval_detector_remediation.csv`.
 
 ### `calibrate_detector.py`
 **Measures:** false-positive rate of the observable-evidence detector on

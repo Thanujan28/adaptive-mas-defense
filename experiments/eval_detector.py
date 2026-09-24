@@ -35,6 +35,7 @@ No thresholds or weights are changed by this script.
 Usage:
     python -m experiments.eval_detector --stub-encoder --stub-judge
     python -m experiments.eval_detector            # needs MiniLM + Ollama
+    python -m experiments.eval_detector --remediation   # + remediation cost/quality comparison
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import argparse
 import contextlib
 import csv
 import io
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -988,6 +990,197 @@ def _strategy_ratio_rows(rows: list[dict]) -> list[dict]:
     ]
 
 
+# =================================================================
+# REMEDIATION COMPARISON MODE (Task S) -- OPTIONAL
+# =================================================================
+#
+# For episodes where remediation would TRIGGER (a Tier-3 judge CONFIRMS a
+# contradiction), run the episode TWICE:
+#
+#   * baseline    - MAS_REMEDIATION_ENABLED=0 (detect only, no re-run)
+#   * remediated  - MAS_REMEDIATION_ENABLED=1 (detect AND contain)
+#
+# and report, per episode:
+#   (a) the ADDED token / LLM-call cost remediation incurred, and
+#   (b) whether the FINAL task output is measurably different / better
+#       after remediation.
+#
+# TASK-QUALITY PROXY -- AND ITS LIMITATION (stated explicitly)
+# ------------------------------------------------------------
+# We do NOT have a full task-quality judge in scope here. The proxy is
+# the SAME semantic-deviation check the detector already uses: assess the
+# final output against the original task with the injected encoder and
+# compare the deviation before vs. after. A LOWER deviation after
+# remediation is reported as "better". This is a PROXY, not a quality
+# verdict: it measures objective/scope drift, not factual correctness or
+# usefulness, and a full quality judge is deliberately out of scope. The
+# CSV column ``quality_proxy`` records the proxy name so no reader can
+# mistake it for a real quality score.
+
+REMEDIATION_QUALITY_PROXY = "semantic_deviation_delta"
+
+
+def _semantic_deviation(assessor, task: str, output: str) -> Optional[float]:
+    """Semantic deviation of ``output`` from ``task`` (proxy only)."""
+
+    if assessor is None:
+        return None
+    assessment = assessor.assess(
+        original_task=task,
+        assigned_subtask=task,
+        agent_output=output if isinstance(output, str) else str(output or ""),
+    )
+    if assessment is None or not assessment.assessed:
+        return None
+    return float(assessment.deviation_score)
+
+
+def _remediation_cost_from_env(env) -> dict:
+    """Sum the remediation cost the environment already recorded."""
+
+    total = {"tokens": 0, "llm_calls": 0, "events": 0, "episodes_with_rerun": 0}
+    for entry in getattr(env, "remediation_summary", []) or []:
+        summary = entry.get("summary", {})
+        cost = summary.get("cost", {})
+        total["tokens"] += int(cost.get("tokens", 0))
+        total["llm_calls"] += int(cost.get("llm_calls", 0))
+        if summary.get("reruns"):
+            total["episodes_with_rerun"] += 1
+        total["events"] += len(summary.get("chunks", []))
+    return total
+
+
+def run_remediation_comparison(
+    topologies: list[str],
+    seeds: list[int],
+    task: str,
+    stub_encoder: bool,
+    stub_llm: bool,
+    stub_nli: bool,
+    stub_judge: bool,
+) -> list[dict]:
+    """
+    Run each episode with remediation OFF then ON and report the added
+    cost plus the final-output quality proxy (see the limitation above).
+
+    Returns CSV-ready rows. Episodes where remediation did NOT trigger
+    are reported with ``remediation_triggered=0`` and zero added cost,
+    so the comparison is honest about the cases it did not change.
+    """
+
+    from environment.mas_environment import MASEnvironment
+    from security.observer import SecurityObserver
+    from security.contradiction_checker import ContradictionChecker
+    from security.llm_judge import LLMJudge
+
+    assessor = _build_assessor(stub_encoder)
+    judge = _build_judge(stub_judge) if not stub_llm else _build_judge(True)
+
+    rows: list[dict] = []
+
+    for condition in IMPLEMENTED_CONDITIONS:
+        for topology in topologies:
+            for seed in seeds:
+
+                def _one(enabled: bool):
+                    # A fresh environment per run so state cannot leak.
+                    if enabled:
+                        os.environ["MAS_REMEDIATION_ENABLED"] = "1"
+                    else:
+                        os.environ.pop("MAS_REMEDIATION_ENABLED", None)
+
+                    if stub_llm:
+                        _install_stub_llm()
+
+                    observer = SecurityObserver(
+                        semantic_assessor=assessor,
+                        contradiction_checker=(
+                            _build_nli_checker(stub_nli) if stub_nli else ContradictionChecker(
+                                model=_AlwaysContradictionNLI()
+                            )
+                        ),
+                        # Honour --stub-judge: a real judge can actually
+                        # CONFIRM contradictions (which is the only way
+                        # remediation triggers); the stub judge is the
+                        # offline default.
+                        llm_judge=LLMJudge(stub=True) if stub_judge else LLMJudge(),
+                        log_enabled=False,
+                    )
+                    env = MASEnvironment(
+                        topology_name=topology,
+                        security_observer=observer,
+                    )
+                    if stub_llm:
+                        _stub_tools(env)
+                    if condition != "clean":
+                        apply_attack(env, condition, task_id=f"{topology}-{seed}")
+
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        final = env.execute_task(task)
+                    return env, final
+
+                try:
+                    base_env, base_final = _one(False)
+                    rem_env, rem_final = _one(True)
+                finally:
+                    # Never leave the flag set for later runs.
+                    os.environ.pop("MAS_REMEDIATION_ENABLED", None)
+
+                cost = _remediation_cost_from_env(rem_env)
+                triggered = int(cost["episodes_with_rerun"] > 0)
+
+                base_dev = _semantic_deviation(assessor, task, base_final)
+                rem_dev = _semantic_deviation(assessor, task, rem_final)
+
+                output_changed = int(
+                    str(base_final or "") != str(rem_final or "")
+                )
+                better = ""
+                if base_dev is not None and rem_dev is not None:
+                    better = int(rem_dev < base_dev)
+
+                rows.append(
+                    {
+                        "condition": condition,
+                        "topology": topology,
+                        "seed": seed,
+                        "remediation_triggered": triggered,
+                        "added_tokens": cost["tokens"],
+                        "added_llm_calls": cost["llm_calls"],
+                        "remediation_events": cost["events"],
+                        "output_changed": output_changed,
+                        "baseline_semantic_deviation": base_dev,
+                        "remediated_semantic_deviation": rem_dev,
+                        "quality_proxy": REMEDIATION_QUALITY_PROXY,
+                        "better_after_remediation": better,
+                        "note": (
+                            "proxy only: semantic deviation of the final "
+                            "output from the task; NOT a full quality judge "
+                            "(out of scope)"
+                        ),
+                    }
+                )
+
+    return rows
+
+
+class _AlwaysContradictionNLI:
+    """Deterministic NLI stub that always reports a contradiction.
+
+    Used ONLY by the remediation-comparison mode so the Tier-3 gate is
+    reached deterministically without downloading a model. It is never
+    used by the headline detector evaluation.
+    """
+
+    def __call__(self, inputs, truncation=True):
+        return [
+            {"label": "contradiction", "score": 0.95},
+            {"label": "entailment", "score": 0.03},
+            {"label": "neutral", "score": 0.02},
+        ]
+
+
 def _write_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -1046,6 +1239,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Skip the held-out payload variants.",
     )
+    parser.add_argument(
+        "--remediation",
+        action="store_true",
+        help=(
+            "OPTIONAL remediation-comparison mode (Task S): run each "
+            "episode with MAS_REMEDIATION_ENABLED off then on, and "
+            "report the added cost + a final-output quality PROXY. "
+            "Off by default; does not change the headline evaluation."
+        ),
+    )
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     args = parser.parse_args(argv)
 
@@ -1078,6 +1281,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     _write_csv(out_dir / "eval_detector_response.csv", response_rows)
     _write_csv(out_dir / "eval_detector_episode.csv", episode_rows)
     _write_csv(out_dir / "eval_detector_strategy.csv", strategy_rows)
+
+    # ---- OPTIONAL: remediation-comparison mode (Task S) ----
+    remediation_rows: list[dict] = []
+    if args.remediation:
+        print()
+        print("=== Remediation-comparison mode (MAS_REMEDIATION_ENABLED "
+              "off vs on) ===")
+        print("  NOTE: 'better after remediation' uses a SEMANTIC-DEVIATION "
+              "PROXY, not a full quality judge (out of scope).")
+        remediation_rows = run_remediation_comparison(
+            topologies=args.topologies,
+            seeds=args.seeds,
+            task=args.task,
+            stub_encoder=args.stub_encoder,
+            stub_llm=args.stub_llm,
+            stub_nli=getattr(args, "stub_nli", False),
+            stub_judge=args.stub_judge,
+        )
+        _write_csv(
+            out_dir / "eval_detector_remediation.csv", remediation_rows
+        )
 
     print()
     print("Per-response metrics (label | payload | variant | auroc | "
