@@ -4062,34 +4062,44 @@ class MASEnvironment:
     def _upstream_responses_for(self, agent_id):
         """Earlier-stage agent outputs (for detective attribution).
 
-        Reconstructed from the observable message artifacts already
-        published in this episode; only messages whose receiver is this
-        agent (i.e. its actual upstream feed) or from stages earlier in
-        the pipeline are included.
+        Only MESSAGES actually delivered TO this agent are included --
+        i.e. its true upstream feed. The agent's OWN published output
+        (which has this agent as the sender) is deliberately excluded,
+        since it is downstream of, not upstream of, this agent.
         """
         responses = {}
         for artifact in self.get_observable_artifacts():
             if artifact.get("artifact_type") != "message":
                 continue
-            receiver = artifact.get("receiver")
-            sender = artifact.get("source")
-            if receiver != agent_id and sender is None:
+            if artifact.get("receiver") != agent_id:
                 continue
+            sender = artifact.get("source")
             text = artifact.get("text") or ""
-            if text:
-                responses.setdefault(f"agent:{sender}", text)
+            if sender and text:
+                # Key by the BARE agent name: EvidenceLinker adds the
+                # "agent:" prefix itself, so adding it here too would
+                # produce a doubled "agent:agent:<name>" id.
+                responses.setdefault(str(sender), text)
         return responses
 
     def _build_consumer_index(self):
         """artifact_id -> agents that consumed it (from artifacts).
 
         A tool result is keyed by 'req:<request_id>'; a message by
-        'msg:<message_id>' (falling back to the sender tag). The
-        detective/tracer emit 'req:<id>' / 'agent:<name>' ids, so both
-        forms are indexed here.
+        'msg:<message_id>', and additionally by 'agent:<sender>' so an
+        attribution to a prior agent's OUTPUT maps onto the agents that
+        RECEIVED a message from it. The detective/tracer emit
+        'req:<id>' / 'agent:<name>' ids, so both forms are indexed.
+
+        Only DELIVERED artifacts (tool results / messages) index a
+        consumer: a memory_write's self-loop ('outline -> outline') must
+        NOT make an agent a consumer of its OWN output, or the cascade
+        would try to re-run the producer itself.
         """
         index = {}
         for artifact in self.get_observable_artifacts():
+            if artifact.get("artifact_type") == "memory_write":
+                continue
             receiver = artifact.get("receiver")
             if not receiver:
                 continue
@@ -4101,7 +4111,10 @@ class MASEnvironment:
                 keys.append(f"req:{request_id}")
             if message_id:
                 keys.append(f"msg:{message_id}")
-            if source:
+            if source and artifact.get("artifact_type") == "message":
+                # An attribution to 'agent:<sender>' means the OUTPUT of
+                # that agent; its consumers are the RECEIVERS of its
+                # messages.
                 keys.append(f"agent:{source}")
             for key in keys:
                 index.setdefault(key, [])
@@ -4191,10 +4204,17 @@ class MASEnvironment:
                     stage, "rerun_skipped", {"reason": "not re-runnable"}
                 )
                 continue
-            method, mailbox_agent, _ = node
-            # Discard any STALE queued input for this agent so it cannot
-            # re-consume the polluted upstream message.
+            method, mailbox_agent, upstream_producer = node
+            # Re-supply the agent's CLEAN upstream input:
+            #   1. drop the stale queued message (the polluted input),
+            #   2. re-inject the upstream producer's current output, so
+            #      the node has the input it needs to run at all.
+            # The discarded artifact itself is a TOOL RESULT the node
+            # fetches on its own, so re-running the node naturally stops
+            # using the discarded result; the mailbox only carries the
+            # inter-agent message, which is NOT the discarded artifact.
             self._drain_mailbox(mailbox_agent)
+            self._redeliver_upstream(mailbox_agent, upstream_producer)
             self._log_containment(
                 mailbox_agent,
                 "rerun_start",
@@ -4203,6 +4223,35 @@ class MASEnvironment:
             method(state)
             reran.append(stage)
         return reran
+
+    def _redeliver_upstream(self, agent, producer):
+        """Re-send the producer's last output to ``agent`` (clean input).
+
+        Reconstructed from the observable artifacts: the most recent
+        message actually delivered from ``producer`` (the nearest upstream
+        stage) to ``agent``. When none exists there is nothing to inject
+        (e.g. the producer has not run), and the node will behave as it
+        did originally.
+        """
+        if not producer:
+            return
+        latest = None
+        for artifact in self.get_observable_artifacts():
+            if artifact.get("artifact_type") != "message":
+                continue
+            if artifact.get("source") != producer:
+                continue
+            if artifact.get("receiver") != agent:
+                continue
+            latest = artifact.get("text")
+        if latest is None:
+            return
+        self.send_message(
+            sender=producer,
+            receiver=agent,
+            content=latest,
+            metadata={"stage": "remediation_redelivery"},
+        )
 
     def _drain_mailbox(self, agent):
         """Drop queued messages for one agent (discard stale input)."""
