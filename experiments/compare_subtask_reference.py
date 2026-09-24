@@ -4,6 +4,14 @@ subtask_similarity.
 
 NOT run in CI.
 
+IMPORTANT -- DATA SOURCE: this script does NOT run the MAS. It reads
+hand-authored / pre-collected samples from a JSONL (``--from-jsonl``),
+or writes a hand-written template (``--write-template``). Every number
+it prints is therefore a SYNTHETIC comparison on hand-written text, NOT
+a measurement of the real system's behaviour on agent output. There is
+no live-episode mode here; it is an offline analysis of a provided
+sample set.
+
 For CLEAN runs over the four topologies, this script computes, for
 each observed agent output, the subtask_similarity under two
 references:
@@ -42,7 +50,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 TOPOLOGIES = ("centralized", "layered", "fully_connected", "shared_pool")
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+from security.model_names import SEMANTIC_MODEL_NAME as MODEL_NAME
 OUTPUT_DIR = Path("outputs")
 TEMPLATE_NAME = "subtask_reference_samples.jsonl"
 
@@ -209,6 +217,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             "generate a template."
         )
 
+    print(
+        "\n" + "!" * 72
+        + "\n!! SYNTHETIC SAMPLES -- not from a real MAS episode."
+        + "\n!! This script only reads a hand-authored/pre-collected"
+        + "\n!! JSONL; it never runs the MAS. Numbers below compare"
+        + "\n!! references on HAND-WRITTEN text, not real agent output."
+        + "\n" + "!" * 72
+    )
     samples = load_samples(args.from_jsonl)
     assessor = _build_assessor(stub=args.stub)
 

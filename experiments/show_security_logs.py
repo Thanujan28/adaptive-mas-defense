@@ -54,7 +54,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+from security.model_names import SEMANTIC_MODEL_NAME as MODEL_NAME
 
 
 # =============================================================
@@ -697,15 +697,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         enable_security_logging()
         print("[logging] security_state records enabled (DEBUG)")
 
-    # Auto-detect the demo file when no source is given, so a bare
-    # run does something useful instead of silently doing nothing.
-    if args.from_jsonl is None:
-        demo = Path("outputs/demo_logs.jsonl")
-        if demo.exists():
-            args.from_jsonl = demo
-            print("[input] no --from-jsonl given; using "
-                  f"{demo}")
-
+    # REAL is the unflagged default, consistent with eval_detector.py and
+    # calibrate_detector.py: a bare run executes a live episode. Reading a
+    # pre-collected/demo JSONL now requires the explicit --from-jsonl
+    # flag, so a bare run can never silently show hand-written demo data
+    # instead of the real system's output.
     if args.from_jsonl is not None and not args.from_jsonl.exists():
         raise RuntimeError(
             f"Input file not found: {args.from_jsonl}. Run with "
@@ -718,8 +714,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         environment = _run_from_jsonl(args, assessor)
         observations = environment.observations
     else:
-        print("[input] no --from-jsonl and no outputs/demo_logs.jsonl "
-              "found; running a LIVE episode (needs Ollama).")
+        print("[input] no --from-jsonl given; running a LIVE episode "
+              "(real MAS; needs Ollama unless you pass --stub for the "
+              "encoder). Pass --from-jsonl to inspect pre-collected "
+              "records instead.")
         environment = _run_episode(args, assessor)
         observations = environment.security_observations
 

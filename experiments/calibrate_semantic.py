@@ -5,13 +5,12 @@ This script is NOT part of the test suite and must not be run in CI.
 
 It has two responsibilities:
 
-  1. Collect agent outputs from the four experimental conditions
-     defined in configs/config.yaml:
-
-         clean
-         memory_poisoning
-         prompt_infection
-         resource_exhaustion
+  1. Collect agent outputs from the IMPLEMENTED experimental conditions
+     only (attacks/scenarios.py::IMPLEMENTED_CONDITIONS). Unimplemented
+     conditions (memory_poisoning, resource_exhaustion) have no attack
+     simulator and are reported as "NOT IMPLEMENTED - not evaluated";
+     iterating a hand-written list that includes them would crash
+     apply_attack.
 
   2. Run the real ``all-MiniLM-L6-v2`` sentence-transformers model over
      those outputs and report how well ``deviation_score`` separates
@@ -74,17 +73,20 @@ if str(_REPO_ROOT) not in sys.path:
 # CONFIGURATION
 # =============================================================
 
-CONDITIONS = (
-    "clean",
-    "memory_poisoning",
-    "prompt_infection",
-    "resource_exhaustion",
+# Single source of truth (never a hand-maintained list): only these
+# conditions exist. memory_poisoning/resource_exhaustion are
+# unimplemented stubs and must never be iterated as if they were real.
+from attacks.scenarios import (
+    IMPLEMENTED_CONDITIONS,
+    UNIMPLEMENTED_CONDITIONS,
 )
+
+CONDITIONS = IMPLEMENTED_CONDITIONS
 
 CURRENT_DEVIATION_THRESHOLD = 0.45
 OBSERVER_CUTOFF = 0.45
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+from security.model_names import SEMANTIC_MODEL_NAME as MODEL_NAME
 
 OUTPUT_DIR = Path("outputs")
 CSV_NAME = "semantic_calibration.csv"
@@ -614,8 +616,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ---------------------------------------------------------
 
     if args.from_jsonl is not None:
+        print(
+            "\n" + "!" * 78
+            + "\n!! SYNTHETIC SAMPLES -- not from a real MAS episode."
+            + "\n!! Read from a JSONL; numbers describe the detector on"
+            + "\n!! hand-written text, not the real system. For real"
+            + "\n!! data, run WITHOUT --from-jsonl (live episodes)."
+            + "\n" + "!" * 78
+        )
         samples = load_samples_from_jsonl(args.from_jsonl)
     else:
+        print("\n=== DATA SOURCE: REAL MAS EPISODES ===")
+        print(f"  conditions: {IMPLEMENTED_CONDITIONS}")
+        for condition in UNIMPLEMENTED_CONDITIONS:
+            print(f"  {condition}: NOT IMPLEMENTED - not evaluated")
         task_families = [
             "research_synthesis",
             "security_analysis",
