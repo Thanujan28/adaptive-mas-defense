@@ -1,3 +1,30 @@
+# =============================================================
+# run_experiment.py -- PPO / RL reproducibility harness
+#
+# RELATIONSHIP TO eval_detector.py (read this before running either):
+#
+#   * experiments/eval_detector.py is the CURRENT tool for DETECTOR
+#     evaluation: it measures the security detector's AUROC / TPR@5%FPR
+#     and the Tier-3 investigation-strategy cost. It never touches the
+#     RL stack.
+#
+#   * THIS script predates eval_detector.py and is NOT fully covered by
+#     it. It drives the RL loop (rl.environment.PPOEnvironment /
+#     rl.policy.PPOReward) over conditions x topologies x benchmark
+#     tasks, and writes decision-step / transition counts, the PPO
+#     security-state signatures and the episode reproducibility check to
+#     outputs/experiment_results.json. eval_detector.py does not import
+#     or exercise PPOEnvironment at all, so these RL numbers exist ONLY
+#     here.
+#
+#   Keep both: this one is the PPO/reproducibility harness; eval_detector
+#   is the detector-evaluation harness. They share the conditions x
+#   topologies loop shape but measure different things.
+#
+# Nothing in the repo imports this module (main.py does not); it is run
+# as a script.
+# =============================================================
+
 import argparse
 import hashlib
 import json
