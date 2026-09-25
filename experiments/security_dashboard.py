@@ -926,6 +926,7 @@ def _run_live_episode(args) -> list[Any]:
             artifact
             for artifact in artifacts
             if artifact.get("receiver") == base.agent_id
+            and artifact.get("artifact_type") != "assignment"
         ]
         response_text = (
             base.response if isinstance(base.response, str) else str(base.response)

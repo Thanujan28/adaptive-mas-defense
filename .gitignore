@@ -91,6 +91,10 @@ _*.txt
 _run_all.py
 _show_lines.py
 
+# One-off real-episode terminal captures (not test fixtures)
+real_episode_*.txt
+real_episode_*.err.txt
+
 # =========================================================
 # Type Checking / Linters
 # =========================================================
