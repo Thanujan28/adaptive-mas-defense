@@ -86,6 +86,11 @@ pytest_collect.txt
 pytest_junit.xml
 timings.txt
 
+# Root-level scratch/debug files
+_*.txt
+_run_all.py
+_show_lines.py
+
 # =========================================================
 # Type Checking / Linters
 # =========================================================

@@ -1126,7 +1126,12 @@ class MASEnvironment:
             )
 
             self.log_artifact(
-                artifact_type="message",
+                artifact_type=(
+                    "assignment"
+                    if (metadata or {}).get("artifact_role")
+                    == "assignment"
+                    else "message"
+                ),
                 source=sender,
                 receiver=receiver,
                 content=content,
@@ -1186,7 +1191,12 @@ class MASEnvironment:
         )
 
         self.log_artifact(
-            artifact_type="message",
+            artifact_type=(
+                "assignment"
+                if (metadata or {}).get("artifact_role")
+                == "assignment"
+                else "message"
+            ),
             source=sender,
             receiver=receiver,
             content=content,
@@ -2148,7 +2158,9 @@ class MASEnvironment:
             content=plan,
             metadata={
                 "stage":
-                    "outline_assignment"
+                    "outline_assignment",
+                "artifact_role":
+                    "assignment",
             },
         )
 
@@ -2827,7 +2839,6 @@ class MASEnvironment:
             agent_name="analyst",
 
             content=(
-                f"Analysis assignment:\n"
                 f"{analysis_message}\n\n"
                 f"Analysis result:\n"
                 f"{analysis_result}"
@@ -3100,7 +3111,6 @@ class MASEnvironment:
             agent_name="executor",
 
             content=(
-                f"Execution assignment:\n"
                 f"{execution_message}\n\n"
                 f"Execution result:\n"
                 f"{execution_result}"
@@ -3695,8 +3705,15 @@ class MASEnvironment:
             artifact
             for artifact in self.get_observable_artifacts()
             if artifact.get("receiver") == agent_id
+            and artifact.get(
+                "artifact_type"
+            ) != "assignment"
         ]
 
+        # Coordinator dispatch artifacts use artifact_type="assignment"
+        # and are intentionally excluded above. They are instructions,
+        # not supporting evidence for the agent's response claims.
+        #
         # Tiered detection is the ONLY live path: chunked semantic
         # (Tier 1) + NLI contradiction vs. this agent's linked evidence
         # (Tier 2) + the gated LLM judge (Tier 3, off unless
